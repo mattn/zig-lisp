@@ -84,9 +84,14 @@ const atom = union(enum) {
     }
 };
 
+fn debug(arg: *atom) !void {
+    try arg.println(std.io.getStdOut().writer());
+}
+
 fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
     var arg: ?*atom = root;
 
+    //try debug(arg.?);
     return switch (arg.?.*) {
         atom.sym => |v| {
             var p = e;
@@ -99,6 +104,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                 }
                 p = p.p.?;
             }
+            std.log.warn("{s}", .{v.items});
             return error.RuntimeError;
         },
         atom.cell => {
@@ -284,50 +290,23 @@ var builtins = [_]function{
     .{ .name = "defun", .ptr = &do_defun },
 };
 
-const ByteReader = struct {
-    str: []const u8,
-    curr: usize,
-
-    const Error = error{NoError};
-    const Self = @This();
-    const Reader = std.io.Reader(*Self, Error, read);
-
-    fn init(str: []const u8) Self {
-        return Self{
-            .str = str,
-            .curr = 0,
-        };
-    }
-
-    fn unget(self: *Self) void {
-        self.curr -= 1;
-    }
-
-    fn read(self: *Self, dest: []u8) Error!usize {
-        if (self.str.len <= self.curr or dest.len == 0) return 0;
-        dest[0] = self.str[self.curr];
-        self.curr += 1;
-        return 1;
-    }
-
-    fn reader(self: *Self) Reader {
-        return .{ .context = self };
-    }
-};
-
+const ByteReader = std.io.PeekStream(std.fifo.LinearFifoBufferType{ .Static = 2 }, std.io.Reader(std.fs.File, std.os.ReadError, std.fs.File.read));
 const SyntaxError = error{};
 const RuntimeError = error{};
 const ParseIntError = std.fmt.ParseIntError;
 const WriteError = std.os.WriteError;
-const LispError = error{ RuntimeError, SyntaxError, OutOfMemory, EndOfStream, NoError, InvalidCharacter } || ParseIntError || WriteError;
+const LispError = error{ RuntimeError, SyntaxError, OutOfMemory, EndOfStream, NoError, InvalidCharacter, IsDir, ConnectionTimedOut, NotOpenForReading } || ParseIntError || WriteError;
 
 fn skipWhilte(br: *ByteReader) LispError!void {
     const r = br.reader();
-    while (true) {
+    loop: while (true) {
         const byte = r.readByte() catch 0;
-        if (byte != ' ' and byte != '\t' and byte != '\r' and byte != '\n') {
-            br.unget();
-            break;
+        switch (byte) {
+            ' ', '\t', '\r', '\n' => {},
+            else => {
+                try br.putBackByte(byte);
+                break :loop;
+            },
         }
     }
 }
@@ -336,16 +315,17 @@ fn parseIdent(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     const r = br.reader();
     var bytes = std.ArrayList(u8).init(a);
     errdefer bytes.deinit();
-    while (true) {
-        const byte = switch (r.readByte() catch 0) {
-            'a'...'z', '0'...'9', '-', '+' => |b| b,
-            else => 0,
-        };
-        if (byte == 0) {
-            br.unget();
-            break;
+    loop: while (true) {
+        const byte = r.readByte() catch 0;
+        switch (byte) {
+            'a'...'z', '0'...'9', '-', '+' => {
+                try bytes.append(byte);
+            },
+            else => {
+                try br.putBackByte(byte);
+                break :loop;
+            },
         }
-        try bytes.append(byte);
     }
     var p = try a.create(atom);
     p.* = atom{
@@ -376,7 +356,7 @@ fn parseCell(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
         if (byte == ')') {
             break;
         }
-        br.unget();
+        try br.putBackByte(byte);
 
         var cdr = try a.create(atom);
         cdr.* = atom{
@@ -444,7 +424,7 @@ fn parseFunc(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
 
         try skipWhilte(br);
         byte = try r.readByte();
-        br.unget();
+        try br.putBackByte(byte);
         if (byte == ')') break;
 
         cdr = try a.create(atom);
@@ -464,16 +444,15 @@ fn parseNumber(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     const r = br.reader();
     var bytes = std.ArrayList(u8).init(a);
     defer bytes.deinit();
-    while (true) {
-        const byte = switch (r.readByte() catch 0) {
-            '0'...'9', '-', '+', 'e' => |b| b,
-            else => 0,
-        };
-        if (byte == 0) {
-            br.unget();
-            break;
+    loop: while (true) {
+        const byte = r.readByte() catch 0;
+        switch (byte) {
+            '0'...'9', '-', '+', 'e' => |b| try bytes.append(b),
+            else => {
+                try br.putBackByte(byte);
+                break :loop;
+            },
         }
-        try bytes.append(byte);
     }
 
     if (std.fmt.parseInt(i64, bytes.items, 10)) |num| {
@@ -483,7 +462,7 @@ fn parseNumber(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
         };
         return p;
     } else |_| {
-        br.unget();
+        try br.putBack(bytes.items);
         return parseIdent(a, br);
     }
 }
@@ -492,13 +471,29 @@ fn parse(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     try skipWhilte(br);
     const r = br.reader();
     const byte = try r.readByte();
-    br.unget();
+    try br.putBackByte(byte);
     return switch (byte) {
         '(' => try parseCell(a, br),
         '0'...'9', '-', '+' => try parseNumber(a, br),
         'a'...'z' => try parseIdent(a, br),
         else => error.SyntaxError,
     };
+}
+
+fn reader(r: anytype) ByteReader {
+    return std.io.peekStream(2, r);
+}
+
+fn run(a: std.mem.Allocator, br: *ByteReader) LispError!void {
+    var e = env.init(a);
+    defer e.deinit();
+    loop: while (true) {
+        if (parse(a, br)) |root| {
+            _ = try eval(&e, a, root);
+        } else |_| {
+            break :loop;
+        }
+    }
 }
 
 pub fn main() anyerror!void {
@@ -509,17 +504,13 @@ pub fn main() anyerror!void {
 
     _ = args.next();
 
-    while (args.next()) |aa| {
-        var f = try std.fs.cwd().openFile(aa, .{});
+    while (args.next()) |arg| {
+        var f = try std.fs.cwd().openFile(arg, .{});
         defer f.close();
-        var bufr = std.io.bufferedReader(f.reader());
-        //var content = try bufr.reader().readAllAlloc(a, 8192);
-
-        //var br = ByteReader.init(content);
-        var root = try parse(a, bufr.fifo);
-
-        var e = env.init(a);
-        defer e.deinit();
-        _ = try eval(&e, a, root);
+        var bufr = reader(f.reader());
+        _ = try run(a, &bufr);
+    } else {
+        var bufr = reader(std.io.getStdIn().reader());
+        _ = try run(a, &bufr);
     }
 }

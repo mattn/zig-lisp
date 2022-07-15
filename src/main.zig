@@ -48,19 +48,21 @@ const atom = union(enum) {
 
     pub fn init(a: std.mem.Allocator) !*atom {
         allocator = a;
-        var me = try a.create(atom);
-        me.* = .{
-            .none = {},
-        };
-        return me;
+        return try a.create(atom);
     }
 
     pub fn deinit(self: *Self) void {
         switch (self.*) {
             .sym => |v| v.deinit(),
             .cell => |v| {
-                if (v.car != null) v.car.?.deinit();
-                if (v.cdr != null) v.cdr.?.deinit();
+                if (v.car != null) {
+                    v.car.?.deinit();
+                    //self.cell.car = null;
+                }
+                if (v.cdr != null) {
+                    v.cdr.?.deinit();
+                    //self.cell.cdr = null;
+                }
             },
             else => {},
         }
@@ -125,7 +127,6 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                 }
                 p = p.p.?;
             }
-            std.log.warn("{s}", .{v.items});
             return error.RuntimeError;
         },
         atom.cell => {
@@ -545,6 +546,7 @@ test "basic test" {
     const T = struct { input: []const u8, want: []const u8 };
     var tests = [_]T{
         .{ .input = "1", .want = "1" },
+        .{ .input = "(+ 1 2)", .want = "3" },
     };
     for (tests) |t| {
         var e = env.init(a);
@@ -557,6 +559,7 @@ test "basic test" {
             defer bytes.deinit();
             try result.print(bytes.writer());
             try std.testing.expect(std.mem.eql(u8, bytes.items, t.want));
+            //root.deinit();
         } else |_| {
             @panic("bad!");
         }

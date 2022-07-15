@@ -12,7 +12,7 @@ const env = struct {
 
     const Self = @This();
 
-    fn init(a: std.mem.Allocator) Self {
+    pub fn init(a: std.mem.Allocator) Self {
         return Self{
             .v = std.StringArrayHashMap(*atom).init(a),
             .p = null,
@@ -21,6 +21,9 @@ const env = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        for (self.v.keys()) |key| {
+            self.v.allocator.free(key);
+        }
         self.v.deinit();
         if (self.c != null) {
             self.c.?.deinit();
@@ -40,23 +43,41 @@ const atom = union(enum) {
     cell: cell,
     none: ?void,
 
-    pub fn println(self: @This(), w: anytype) std.os.WriteError!void {
+    const Self = @This();
+    var allocator: std.mem.Allocator = undefined;
+
+    pub fn init(a: std.mem.Allocator) !*atom {
+        allocator = a;
+        var me = try a.create(atom);
+        me.* = .{
+            .none = {},
+        };
+        return me;
+    }
+
+    pub fn deinit(self: *Self) void {
+        switch (self.*) {
+            .sym => |v| v.deinit(),
+            .cell => |v| {
+                if (v.car != null) v.car.?.deinit();
+                if (v.cdr != null) v.cdr.?.deinit();
+            },
+            else => {},
+        }
+        allocator.destroy(self);
+    }
+
+    pub fn println(self: @This(), w: anytype) LispError!void {
         try self.print(w);
         try w.writeByte('\n');
     }
 
-    pub fn print(self: @This(), w: anytype) std.os.WriteError!void {
+    pub fn print(self: @This(), w: anytype) LispError!void {
         switch (self) {
-            .sym => |v| {
-                try w.writeAll(v.items);
-            },
-            .none => {},
-            .func => |v| {
-                try w.writeAll(v.name);
-            },
-            .num => |v| {
-                try w.print("{}", .{v});
-            },
+            .none => try w.writeAll("null"),
+            .sym => |v| try w.writeAll(v.items),
+            .func => |v| try w.writeAll(v.name),
+            .num => |v| try w.print("{}", .{v}),
             .cell => |v| {
                 try w.writeByte('(');
                 try v.car.?.print(w);
@@ -163,7 +184,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             return error.RuntimeError;
         }
         if (arg.cell.cdr == null) {
-            var na = try a.create(atom);
+            var na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -182,7 +203,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     }
     var num: i64 = val.num;
     if (arg.cell.cdr == null) {
-        var na = try a.create(atom);
+        var na = try atom.init(a);
         na.* = atom{
             .num = num,
         };
@@ -197,7 +218,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             return error.RuntimeError;
         }
         if (arg.cell.cdr == null) {
-            var na = try a.create(atom);
+            var na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -218,7 +239,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             return error.RuntimeError;
         }
         if (arg.cell.cdr == null) {
-            var na = try a.create(atom);
+            var na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -237,7 +258,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     }
     var num: i64 = val.num;
     if (arg.cell.cdr == null) {
-        var na = try a.create(atom);
+        var na = try atom.init(a);
         na.* = atom{
             .num = num,
         };
@@ -250,7 +271,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             num = @divTrunc(num, val.num);
         }
         if (arg.cell.cdr == null) {
-            var na = try a.create(atom);
+            var na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -290,14 +311,13 @@ var builtins = [_]function{
     .{ .name = "defun", .ptr = &do_defun },
 };
 
-const ByteReader = std.io.PeekStream(std.fifo.LinearFifoBufferType{ .Static = 2 }, std.io.Reader(std.fs.File, std.os.ReadError, std.fs.File.read));
 const SyntaxError = error{};
 const RuntimeError = error{};
 const ParseIntError = std.fmt.ParseIntError;
 const WriteError = std.os.WriteError;
 const LispError = error{ RuntimeError, SyntaxError, OutOfMemory, EndOfStream, NoError, InvalidCharacter, IsDir, ConnectionTimedOut, NotOpenForReading } || ParseIntError || WriteError;
 
-fn skipWhilte(br: *ByteReader) LispError!void {
+fn skipWhilte(br: anytype) LispError!void {
     const r = br.reader();
     loop: while (true) {
         const byte = r.readByte() catch 0;
@@ -311,7 +331,7 @@ fn skipWhilte(br: *ByteReader) LispError!void {
     }
 }
 
-fn parseIdent(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
+fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
     const r = br.reader();
     var bytes = std.ArrayList(u8).init(a);
     errdefer bytes.deinit();
@@ -327,19 +347,19 @@ fn parseIdent(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
             },
         }
     }
-    var p = try a.create(atom);
+    var p = try atom.init(a);
     p.* = atom{
         .sym = bytes,
     };
     return p;
 }
 
-fn parseCell(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
+fn parseCell(a: std.mem.Allocator, br: anytype) LispError!*atom {
     const r = br.reader();
     var byte = try r.readByte();
     if (byte != '(') return error.SyntaxError;
 
-    var top = try a.create(atom);
+    var top = try atom.init(a);
     top.* = atom{
         .cell = cell{
             .car = null,
@@ -358,7 +378,7 @@ fn parseCell(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
         }
         try br.putBackByte(byte);
 
-        var cdr = try a.create(atom);
+        var cdr = try atom.init(a);
         cdr.* = atom{
             .cell = cell{
                 .car = null,
@@ -371,7 +391,7 @@ fn parseCell(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     return top;
 }
 
-fn parseFunc(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
+fn parseFunc(a: std.mem.Allocator, br: anytype) LispError!*atom {
     const r = br.reader();
     var byte = try r.readByte();
     if (byte != '(') return error.SyntaxError;
@@ -394,11 +414,11 @@ fn parseFunc(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
         }
     }
 
-    var fa = try a.create(atom);
+    var fa = try atom.init(a);
     fa.* = atom{
         .func = &builtins[found],
     };
-    var top = try a.create(atom);
+    var top = try atom.init(a);
     top.* = atom{
         .cell = cell{
             .car = fa,
@@ -407,7 +427,7 @@ fn parseFunc(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     };
     var p = top;
 
-    var cdr = try a.create(atom);
+    var cdr = try atom.init(a);
     cdr.* = atom{
         .cell = cell{
             .car = null,
@@ -427,7 +447,7 @@ fn parseFunc(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
         try br.putBackByte(byte);
         if (byte == ')') break;
 
-        cdr = try a.create(atom);
+        cdr = try atom.init(a);
         cdr.* = atom{
             .cell = cell{
                 .car = null,
@@ -440,7 +460,7 @@ fn parseFunc(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     return top;
 }
 
-fn parseNumber(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
+fn parseNumber(a: std.mem.Allocator, br: anytype) LispError!*atom {
     const r = br.reader();
     var bytes = std.ArrayList(u8).init(a);
     defer bytes.deinit();
@@ -456,7 +476,7 @@ fn parseNumber(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     }
 
     if (std.fmt.parseInt(i64, bytes.items, 10)) |num| {
-        var p = try a.create(atom);
+        var p = try atom.init(a);
         p.* = atom{
             .num = num,
         };
@@ -467,7 +487,7 @@ fn parseNumber(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     }
 }
 
-fn parse(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
+fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
     try skipWhilte(br);
     const r = br.reader();
     const byte = try r.readByte();
@@ -480,11 +500,15 @@ fn parse(a: std.mem.Allocator, br: *ByteReader) LispError!*atom {
     };
 }
 
-fn reader(r: anytype) ByteReader {
+fn reader(r: anytype) bufReader(@TypeOf(r)) {
     return std.io.peekStream(2, r);
 }
 
-fn run(a: std.mem.Allocator, br: *ByteReader) LispError!void {
+fn bufReader(r: anytype) type {
+    return std.io.PeekStream(std.fifo.LinearFifoBufferType{ .Static = 2 }, r);
+}
+
+fn run(a: std.mem.Allocator, br: anytype) LispError!void {
     var e = env.init(a);
     defer e.deinit();
     loop: while (true) {
@@ -512,5 +536,29 @@ pub fn main() anyerror!void {
     } else {
         var bufr = reader(std.io.getStdIn().reader());
         _ = try run(a, &bufr);
+    }
+}
+
+test "basic test" {
+    var a = std.testing.allocator;
+
+    const T = struct { input: []const u8, want: []const u8 };
+    var tests = [_]T{
+        .{ .input = "1", .want = "1" },
+    };
+    for (tests) |t| {
+        var e = env.init(a);
+        defer e.deinit();
+        var br = reader(std.io.fixedBufferStream(t.input).reader());
+        if (parse(a, &br)) |root| {
+            var result = try eval(&e, a, root);
+            defer result.deinit();
+            var bytes = std.ArrayList(u8).init(a);
+            defer bytes.deinit();
+            try result.print(bytes.writer());
+            try std.testing.expect(std.mem.eql(u8, bytes.items, t.want));
+        } else |_| {
+            @panic("bad!");
+        }
     }
 }

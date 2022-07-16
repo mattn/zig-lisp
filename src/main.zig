@@ -51,6 +51,12 @@ const atom = union(enum) {
         return try a.create(atom);
     }
 
+    pub fn copy(self: *Self) !*Self {
+        var n = try atom.init(Self.allocator);
+        n.* = self.*;
+        return n;
+    }
+
     pub fn deinit(self: *Self) void {
         switch (self.*) {
             .sym => |v| v.deinit(),
@@ -170,7 +176,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             }
             unreachable;
         },
-        else => arg.?,
+        else => arg.?.copy(),
     };
 }
 
@@ -179,6 +185,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num: i64 = 0;
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
+        defer val.deinit();
         if (val.* == atom.num) {
             num += val.num;
         } else {
@@ -199,6 +206,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var val = try eval(e, a, arg.cell.car.?);
+    defer val.deinit();
     if (val.* != atom.num) {
         return error.RuntimeError;
     }
@@ -213,6 +221,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     while (true) {
         arg = arg.cell.cdr.?;
         val = try eval(e, a, arg.cell.car.?);
+        defer val.deinit();
         if (val.* == atom.num) {
             num -= val.num;
         } else {
@@ -234,6 +243,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num: i64 = 1;
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
+        defer val.deinit();
         if (val.* == atom.num) {
             num *= val.num;
         } else {
@@ -254,6 +264,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var val = try eval(e, a, arg.cell.car.?);
+    defer val.deinit();
     if (val.* != atom.num) {
         return error.RuntimeError;
     }
@@ -271,6 +282,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         if (val.* == atom.num) {
             num = @divTrunc(num, val.num);
         }
+        val.deinit();
         if (arg.cell.cdr == null) {
             var na = try atom.init(a);
             na.* = atom{
@@ -559,7 +571,7 @@ test "basic test" {
             defer bytes.deinit();
             try result.print(bytes.writer());
             try std.testing.expect(std.mem.eql(u8, bytes.items, t.want));
-            //root.deinit();
+            root.deinit();
         } else |_| {
             @panic("bad!");
         }

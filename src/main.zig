@@ -5,6 +5,11 @@ const cell = struct {
     cdr: ?*atom,
 };
 
+const function = struct {
+    name: []const u8,
+    ptr: *const fn (*env, std.mem.Allocator, *atom) LispError!*atom,
+};
+
 const env = struct {
     v: std.StringArrayHashMap(*atom),
     p: ?*env,
@@ -21,19 +26,16 @@ const env = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        for (self.v.keys()) |key| {
-            self.v.allocator.free(key);
-        }
+        self.v.clearAndFree();
         self.v.deinit();
         if (self.c != null) {
             self.c.?.deinit();
         }
     }
-};
 
-const function = struct {
-    name: []const u8,
-    ptr: *const fn (*env, std.mem.Allocator, *atom) LispError!*atom,
+    pub fn update(self: *Self, key: []const u8, value: *atom) !void {
+        try self.v.put(key, value);
+    }
 };
 
 const atom = union(enum) {
@@ -63,11 +65,9 @@ const atom = union(enum) {
             .cell => |v| {
                 if (v.car != null) {
                     v.car.?.deinit();
-                    //self.cell.car = null;
                 }
                 if (v.cdr != null) {
                     v.cdr.?.deinit();
-                    //self.cell.cdr = null;
                 }
             },
             else => {},
@@ -126,7 +126,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             var p = e;
             while (true) {
                 if (p.v.get(v.items)) |ev| {
-                    return ev;
+                    return ev.copy();
                 }
                 if (p.p == null) {
                     break;
@@ -296,10 +296,10 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 
 pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
-    var name = arg.cell.car.?;
     var val = try eval(e, a, arg.cell.cdr.?.cell.car.?);
+    var name = arg.cell.car.?;
     try e.v.put(name.sym.items, val);
-    return args;
+    return val;
 }
 
 pub fn do_defun(e: *env, _: std.mem.Allocator, args: *atom) LispError!*atom {
@@ -521,12 +521,14 @@ fn bufReader(r: anytype) type {
     return std.io.PeekStream(std.fifo.LinearFifoBufferType{ .Static = 2 }, r);
 }
 
-fn run(a: std.mem.Allocator, br: anytype) LispError!void {
+fn run(a: std.mem.Allocator, br: anytype) !void {
     var e = env.init(a);
     defer e.deinit();
     loop: while (true) {
         if (parse(a, br)) |root| {
-            _ = try eval(&e, a, root);
+            var result = try eval(&e, a, root);
+            result.deinit();
+            root.deinit();
         } else |_| {
             break :loop;
         }
@@ -545,10 +547,10 @@ pub fn main() anyerror!void {
         var f = try std.fs.cwd().openFile(arg, .{});
         defer f.close();
         var bufr = reader(f.reader());
-        _ = try run(a, &bufr);
+        try run(a, &bufr);
     } else {
         var bufr = reader(std.io.getStdIn().reader());
-        _ = try run(a, &bufr);
+        try run(a, &bufr);
     }
 }
 
@@ -557,23 +559,35 @@ test "basic test" {
 
     const T = struct { input: []const u8, want: []const u8 };
     var tests = [_]T{
-        .{ .input = "1", .want = "1" },
-        .{ .input = "(+ 1 2)", .want = "3" },
+        .{ .input = "1", .want = "1\n" },
+        .{ .input = "(+ 1 2)", .want = "3\n" },
+        .{ .input = "(setq a 1)", .want = "1\n" },
+        .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },
     };
     for (tests) |t| {
+        var br = reader(std.io.fixedBufferStream(t.input).reader());
+
         var e = env.init(a);
         defer e.deinit();
-        var br = reader(std.io.fixedBufferStream(t.input).reader());
-        if (parse(a, &br)) |root| {
-            var result = try eval(&e, a, root);
-            defer result.deinit();
-            var bytes = std.ArrayList(u8).init(a);
-            defer bytes.deinit();
-            try result.print(bytes.writer());
-            try std.testing.expect(std.mem.eql(u8, bytes.items, t.want));
-            root.deinit();
-        } else |_| {
-            @panic("bad!");
+
+        var bytes = std.ArrayList(u8).init(a);
+        defer bytes.deinit();
+
+        var gc = std.ArrayList(*atom).init(a);
+        loop: while (true) {
+            if (parse(a, &br)) |root| {
+                var result = try eval(&e, a, root);
+                try result.println(bytes.writer());
+                try gc.append(result);
+                try gc.append(root);
+            } else |_| {
+                break :loop;
+            }
         }
+        for (gc.items) |value| {
+            value.deinit();
+        }
+        gc.deinit();
+        try std.testing.expect(std.mem.eql(u8, bytes.items, t.want));
     }
 }

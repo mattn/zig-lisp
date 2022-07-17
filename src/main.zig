@@ -302,10 +302,14 @@ pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     return val;
 }
 
-pub fn do_defun(e: *env, _: std.mem.Allocator, args: *atom) LispError!*atom {
+pub fn do_defun(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var name = args.cell.car.?;
     try e.v.put(name.sym.items, args);
-    return args;
+    var p = try atom.init(a);
+    p.* = atom{
+        .none = undefined,
+    };
+    return p;
 }
 
 pub fn do_print(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
@@ -563,6 +567,8 @@ test "basic test" {
         .{ .input = "(+ 1 2)", .want = "3\n" },
         .{ .input = "(setq a 1)", .want = "1\n" },
         .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },
+        .{ .input = "(defun foo (a b) (+ a b))", .want = "null\n" },
+        .{ .input = "(defun foo (a b) (+ a b))(foo 1 2)", .want = "null\n3\n" },
     };
     for (tests) |t| {
         var br = reader(std.io.fixedBufferStream(t.input).reader());

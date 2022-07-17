@@ -46,33 +46,31 @@ const atom = union(enum) {
     none: ?void,
 
     const Self = @This();
-    var allocator: std.mem.Allocator = undefined;
 
     pub fn init(a: std.mem.Allocator) !*atom {
-        allocator = a;
         return try a.create(atom);
     }
 
-    pub fn copy(self: *Self) !*Self {
-        var n = try atom.init(Self.allocator);
+    pub fn copy(self: *Self, a: std.mem.Allocator) !*Self {
+        var n = try atom.init(a);
         n.* = self.*;
         return n;
     }
 
-    pub fn deinit(self: *Self) void {
+    pub fn deinit(self: *Self, a: std.mem.Allocator) void {
         switch (self.*) {
             .sym => |v| v.deinit(),
             .cell => |v| {
                 if (v.car != null) {
-                    v.car.?.deinit();
+                    v.car.?.deinit(a);
                 }
                 if (v.cdr != null) {
-                    v.cdr.?.deinit();
+                    v.cdr.?.deinit(a);
                 }
             },
             else => {},
         }
-        allocator.destroy(self);
+        a.destroy(self);
     }
 
     pub fn println(self: @This(), w: anytype) LispError!void {
@@ -126,7 +124,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             var p = e;
             while (true) {
                 if (p.v.get(v.items)) |ev| {
-                    return ev.copy();
+                    return ev.copy(a);
                 }
                 if (p.p == null) {
                     break;
@@ -176,7 +174,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             }
             unreachable;
         },
-        else => arg.?.copy(),
+        else => arg.?.copy(a),
     };
 }
 
@@ -185,7 +183,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num: i64 = 0;
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit();
+        defer val.deinit(a);
         if (val.* == atom.num) {
             num += val.num;
         } else {
@@ -206,7 +204,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var val = try eval(e, a, arg.cell.car.?);
-    defer val.deinit();
+    defer val.deinit(a);
     if (val.* != atom.num) {
         return error.RuntimeError;
     }
@@ -221,7 +219,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     while (true) {
         arg = arg.cell.cdr.?;
         val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit();
+        defer val.deinit(a);
         if (val.* == atom.num) {
             num -= val.num;
         } else {
@@ -243,7 +241,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num: i64 = 1;
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit();
+        defer val.deinit(a);
         if (val.* == atom.num) {
             num *= val.num;
         } else {
@@ -264,7 +262,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var val = try eval(e, a, arg.cell.car.?);
-    defer val.deinit();
+    defer val.deinit(a);
     if (val.* != atom.num) {
         return error.RuntimeError;
     }
@@ -282,7 +280,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         if (val.* == atom.num) {
             num = @divTrunc(num, val.num);
         }
-        val.deinit();
+        val.deinit(a);
         if (arg.cell.cdr == null) {
             var na = try atom.init(a);
             na.* = atom{
@@ -542,7 +540,7 @@ fn run(a: std.mem.Allocator, br: anytype) !void {
         }
     }
     for (gc.items) |value| {
-        value.deinit();
+        value.deinit(a);
     }
     gc.deinit();
 }

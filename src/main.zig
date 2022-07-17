@@ -530,15 +530,21 @@ fn bufReader(r: anytype) type {
 fn run(a: std.mem.Allocator, br: anytype) !void {
     var e = env.init(a);
     defer e.deinit();
+
+    var gc = std.ArrayList(*atom).init(a);
     loop: while (true) {
         if (parse(a, br)) |root| {
             var result = try eval(&e, a, root);
-            result.deinit();
-            root.deinit();
+            try gc.append(result);
+            try gc.append(root);
         } else |_| {
             break :loop;
         }
     }
+    for (gc.items) |value| {
+        value.deinit();
+    }
+    gc.deinit();
 }
 
 pub fn main() anyerror!void {

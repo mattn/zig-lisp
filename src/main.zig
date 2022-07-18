@@ -93,7 +93,7 @@ const atom = union(enum) {
                 }
             },
             .quote => |v| {
-                v.?.deinit(a, true);
+                if (final) v.?.deinit(a, true);
             },
             .num => {},
             .func => {},

@@ -613,6 +613,9 @@ fn run(a: std.mem.Allocator, br: anytype) !void {
         for (gcValue.items) |value| {
             value.deinit(a, false);
         }
+        for (gcAST.items) |value| {
+            value.deinit(a, false);
+        }
         gcValue.deinit();
     }
     while (true) {

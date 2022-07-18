@@ -83,6 +83,9 @@ const atom = union(enum) {
             .sym => |v| v.deinit(),
             .str => |v| v.deinit(),
             .cell => |v| {
+                if (!final) {
+                    return;
+                }
                 if (v.car != null) {
                     v.car.?.deinit(a, final);
                     self.cell.car = null;
@@ -93,7 +96,9 @@ const atom = union(enum) {
                 }
             },
             .quote => |v| {
-                if (final) v.?.deinit(a, true);
+                if (final) {
+                    v.?.deinit(a, true);
+                }
             },
             .num => {},
             .func => {},
@@ -233,7 +238,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             }
             unreachable;
         },
-        atom.quote => |v| try v.?.copy(a),
+        atom.quote => |v| v.?,
         atom.num => try arg.?.copy(a),
         atom.func => try arg.?.copy(a),
         atom.none => try arg.?.copy(a),
@@ -660,15 +665,15 @@ test "basic test" {
 
     const T = struct { input: []const u8, want: []const u8 };
     var tests = [_]T{
-        .{ .input = "1", .want = "1\n" },
-        .{ .input = "(+ 1 2)", .want = "3\n" },
-        .{ .input = "(setq a 1)", .want = "1\n" },
-        .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },
-        .{ .input = "(defun foo (a b) (+ a b))", .want = "foo\n" },
-        .{ .input = "(defun foo (a b) (+ a b))(foo 1 2)", .want = "foo\n3\n" },
-        .{ .input = "(concatenate \"foo\" \"bar\")", .want = "foobar\n" },
-        //.{ .input = "'(1 2 3)", .want = "(1 2 3)\n" },
-        //.{ .input = "(length '(1 2 3))", .want = "3\n" },
+        // .{ .input = "1", .want = "1\n" },
+        // .{ .input = "(+ 1 2)", .want = "3\n" },
+        // .{ .input = "(setq a 1)", .want = "1\n" },
+        // .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },
+        // .{ .input = "(defun foo (a b) (+ a b))", .want = "foo\n" },
+        // .{ .input = "(defun foo (a b) (+ a b))(foo 1 2)", .want = "foo\n3\n" },
+        // .{ .input = "(concatenate \"foo\" \"bar\")", .want = "foobar\n" },
+        .{ .input = "'(1 2 3)", .want = "(1 2 3)\n" },
+        .{ .input = "(length '(1 2 3))", .want = "3\n" },
     };
     for (tests) |t| {
         var br = reader(std.io.fixedBufferStream(t.input).reader());

@@ -665,13 +665,13 @@ test "basic test" {
 
     const T = struct { input: []const u8, want: []const u8 };
     var tests = [_]T{
-        // .{ .input = "1", .want = "1\n" },
-        // .{ .input = "(+ 1 2)", .want = "3\n" },
-        // .{ .input = "(setq a 1)", .want = "1\n" },
-        // .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },
-        // .{ .input = "(defun foo (a b) (+ a b))", .want = "foo\n" },
-        // .{ .input = "(defun foo (a b) (+ a b))(foo 1 2)", .want = "foo\n3\n" },
-        // .{ .input = "(concatenate \"foo\" \"bar\")", .want = "foobar\n" },
+        .{ .input = "1", .want = "1\n" },
+        .{ .input = "(+ 1 2)", .want = "3\n" },
+        .{ .input = "(setq a 1)", .want = "1\n" },
+        .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },
+        .{ .input = "(defun foo (a b) (+ a b))", .want = "foo\n" },
+        .{ .input = "(defun foo (a b) (+ a b))(foo 1 2)", .want = "foo\n3\n" },
+        .{ .input = "(concatenate \"foo\" \"bar\")", .want = "foobar\n" },
         .{ .input = "'(1 2 3)", .want = "(1 2 3)\n" },
         .{ .input = "(length '(1 2 3))", .want = "3\n" },
     };

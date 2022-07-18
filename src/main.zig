@@ -597,7 +597,7 @@ test "basic test" {
             }
         }
         for (gc.items) |value| {
-            value.deinit();
+            value.deinit(a);
         }
         gc.deinit();
         try std.testing.expect(std.mem.eql(u8, bytes.items, t.want));

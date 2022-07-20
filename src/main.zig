@@ -175,29 +175,29 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
 
     //try debug(arg.?);
     return switch (arg.?.*) {
-        atom.sym => |v| {
+        atom.sym => |v| blk: {
             var p = e;
             while (true) {
                 if (p.v.get(v.items)) |ev| {
-                    return try ev.copy(a);
+                    break :blk try ev.copy(a);
                 }
                 if (p.p == null) {
                     break;
                 }
                 p = p.p.?;
             }
-            return error.RuntimeError;
+            break :blk error.RuntimeError;
         },
-        atom.str => |v| {
+        atom.str => |v| blk: {
             var bytes = std.ArrayList(u8).init(a);
             try bytes.writer().writeAll(v.items);
             var na = try atom.init(a);
             na.* = atom{
                 .str = bytes,
             };
-            return na;
+            break :blk na;
         },
-        atom.cell => {
+        atom.cell => blk: {
             var last = arg.?;
             while (true) {
                 last = try switch (arg.?.cell.car.?.*) {
@@ -206,7 +206,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                         var funcname = arg.?.cell.car.?.sym.items;
                         for (builtins) |b, i| {
                             if (std.mem.eql(u8, b.name, funcname)) {
-                                return builtins[i].ptr.*(e, a, arg.?.cell.cdr.?);
+                                break :blk builtins[i].ptr.*(e, a, arg.?.cell.cdr.?);
                             }
                         }
                         if (e.v.get(funcname)) |f| {
@@ -224,16 +224,16 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                                     pa = pa.?.cell.cdr;
                                     fa = fa.?.cell.cdr;
                                 }
-                                return eval(&newe, a, f.cell.cdr.?.cell.cdr.?.cell.car.?);
+                                break :blk eval(&newe, a, f.cell.cdr.?.cell.cdr.?.cell.car.?);
                             }
                         }
-                        return error.RuntimeError;
+                        break :blk error.RuntimeError;
                     },
                     else => eval(e, a, arg.?.cell.car.?),
                 };
                 arg = arg.?.cell.cdr;
                 if (arg == null) {
-                    return last;
+                    break :blk last;
                 }
             }
             unreachable;

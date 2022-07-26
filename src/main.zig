@@ -449,11 +449,10 @@ const LispError = error{ RuntimeError, SyntaxError, OutOfMemory, EndOfStream, No
 fn skipWhilte(br: anytype) LispError!void {
     const r = br.reader();
     loop: while (true) {
-        const byte = r.readByte() catch 0;
-        switch (byte) {
+        switch (r.readByte() catch 0) {
             ' ', '\t', '\r', '\n' => {},
             else => |v| {
-                if (v != 0) try br.putBackByte(byte);
+                if (v != 0) try br.putBackByte(v);
                 break :loop;
             },
         }
@@ -492,13 +491,12 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
     var bytes = std.ArrayList(u8).init(a);
     errdefer bytes.deinit();
     loop: while (true) {
-        const byte = r.readByte() catch 0;
-        switch (byte) {
-            'a'...'z', '0'...'9', '-', '+' => {
-                try bytes.append(byte);
+        switch (r.readByte() catch 0) {
+            'a'...'z', '0'...'9', '-', '+' => |v| {
+                try bytes.append(v);
             },
             else => |v| {
-                if (v != 0) try br.putBackByte(byte);
+                if (v != 0) try br.putBackByte(v);
                 break :loop;
             },
         }
@@ -563,11 +561,10 @@ fn parseNumber(a: std.mem.Allocator, br: anytype) LispError!*atom {
     var bytes = std.ArrayList(u8).init(a);
     defer bytes.deinit();
     loop: while (true) {
-        const byte = r.readByte() catch 0;
-        switch (byte) {
-            '0'...'9', '-', '+', 'e' => |b| try bytes.append(b),
+        switch (r.readByte() catch 0) {
+            '0'...'9', '-', '+', 'e' => |v| try bytes.append(v),
             else => |v| {
-                if (v != 0) try br.putBackByte(byte);
+                if (v != 0) try br.putBackByte(v);
                 break :loop;
             },
         }

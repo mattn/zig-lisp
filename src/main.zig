@@ -497,8 +497,8 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
             'a'...'z', '0'...'9', '-', '+' => {
                 try bytes.append(byte);
             },
-            else => {
-                try br.putBackByte(byte);
+            else => |v| {
+                if (v != 0) try br.putBackByte(byte);
                 break :loop;
             },
         }
@@ -566,8 +566,8 @@ fn parseNumber(a: std.mem.Allocator, br: anytype) LispError!*atom {
         const byte = r.readByte() catch 0;
         switch (byte) {
             '0'...'9', '-', '+', 'e' => |b| try bytes.append(b),
-            else => {
-                try br.putBackByte(byte);
+            else => |v| {
+                if (v != 0) try br.putBackByte(byte);
                 break :loop;
             },
         }

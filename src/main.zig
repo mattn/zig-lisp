@@ -31,6 +31,18 @@ const env = struct {
         };
     }
 
+    pub fn child(self: *Self) Self {
+        var c = Self{
+            .a = self.a,
+            .v = std.StringArrayHashMap(*atom).init(self.a),
+            .p = self,
+            .c = null,
+            .err = null,
+        };
+        self.c = &c;
+        return c;
+    }
+
     pub fn deinit(self: *Self) void {
         self.v.clearAndFree();
         self.v.deinit();
@@ -211,7 +223,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                         }
                         if (e.v.get(funcname)) |f| {
                             if (f.cell.cdr.?.* == atom.cell) {
-                                var newe = env.init(a);
+                                var newe = e.child();
                                 defer newe.deinit();
                                 newe.p = e;
                                 var pa = f.cell.cdr.?.cell.car;

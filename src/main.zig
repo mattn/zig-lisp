@@ -16,7 +16,6 @@ const env = struct {
     a: std.mem.Allocator,
     v: std.StringArrayHashMap(*atom),
     p: ?*env,
-    c: ?*env,
     err: ?[]const u8,
 
     const Self = @This();
@@ -26,7 +25,6 @@ const env = struct {
             .a = a,
             .v = std.StringArrayHashMap(*atom).init(a),
             .p = null,
-            .c = null,
             .err = null,
         };
     }
@@ -36,19 +34,14 @@ const env = struct {
             .a = self.a,
             .v = std.StringArrayHashMap(*atom).init(self.a),
             .p = self,
-            .c = null,
             .err = null,
         };
-        self.c = &c;
         return c;
     }
 
     pub fn deinit(self: *Self) void {
         self.v.clearAndFree();
         self.v.deinit();
-        if (self.c != null) {
-            self.c.?.deinit();
-        }
         if (self.err != null) {
             self.a.free(self.err.?);
         }

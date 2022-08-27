@@ -206,12 +206,12 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             var last = arg.?;
             while (true) {
                 last = try switch (arg.?.cell.car.?.*) {
-                    atom.func => arg.?.cell.car.?.func.ptr.*(e, a, arg.?.cell.cdr.?),
+                    atom.func => (arg.?.cell.car.?.func.ptr)(e, a, arg.?.cell.cdr.?),
                     atom.sym => {
                         var funcname = arg.?.cell.car.?.sym.items;
                         for (builtins) |b, i| {
                             if (std.mem.eql(u8, b.name, funcname)) {
-                                break :blk builtins[i].ptr.*(e, a, arg.?.cell.cdr.?);
+                                break :blk (builtins[i].ptr)(e, a, arg.?.cell.cdr.?);
                             }
                         }
                         if (e.v.get(funcname)) |f| {

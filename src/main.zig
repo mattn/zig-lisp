@@ -236,7 +236,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                     atom.lambda => {
                         var newe = e.child();
                         defer newe.deinit();
-                        newe.p = e;
+                        newe.p = arg.?.cell.car.?.lambda.e.?;
                         var pa = arg.?.cell.car.?.lambda.cell.car;
                         var fa = arg.?.cell.cdr;
                         while (pa != null) {

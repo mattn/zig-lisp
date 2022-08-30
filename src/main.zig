@@ -5,6 +5,11 @@ const cell = struct {
     cdr: ?*atom,
 };
 
+const lambda = struct {
+    e: ?*env,
+    cell: cell,
+};
+
 const ref = ?*atom;
 
 const function = struct {
@@ -66,7 +71,7 @@ const atom = union(enum) {
     sym: std.ArrayList(u8),
     num: i64,
     str: std.ArrayList(u8),
-    lambda: cell,
+    lambda: lambda,
     func: *const function,
     quote: ?*atom,
     cell: cell,
@@ -92,12 +97,12 @@ const atom = union(enum) {
                 if (!final) {
                     return;
                 }
-                if (v.car != null) {
-                    v.car.?.deinit(a, final);
+                if (v.cell.car != null) {
+                    v.cell.car.?.deinit(a, final);
                     self.cell.car = null;
                 }
-                if (v.cdr != null) {
-                    v.cdr.?.deinit(a, final);
+                if (v.cell.cdr != null) {
+                    v.cell.cdr.?.deinit(a, final);
                     self.cell.cdr = null;
                 }
             },
@@ -156,9 +161,9 @@ const atom = union(enum) {
             .num => |v| try w.print("{}", .{v}),
             .lambda => |v| {
                 try w.writeAll("(lambda ");
-                try v.cdr.?.cell.car.?.cell.cdr.?.print(w, quoted);
+                try v.cell.cdr.?.cell.car.?.cell.cdr.?.print(w, quoted);
                 try w.writeByte(' ');
-                try v.cdr.?.cell.car.?.print(w, quoted);
+                try v.cell.cdr.?.cell.car.?.print(w, quoted);
                 try w.writeByte(')');
             },
             .cell => |v| {
@@ -232,7 +237,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                         var newe = e.child();
                         defer newe.deinit();
                         newe.p = e;
-                        var pa = arg.?.cell.car.?.lambda.car;
+                        var pa = arg.?.cell.car.?.lambda.cell.car;
                         var fa = arg.?.cell.cdr;
                         while (pa != null) {
                             try newe.v.put(
@@ -242,7 +247,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                             pa = pa.?.cell.cdr;
                             fa = fa.?.cell.cdr;
                         }
-                        break :blk eval(&newe, a, arg.?.cell.car.?.lambda.cdr.?);
+                        break :blk eval(&newe, a, arg.?.cell.car.?.lambda.cell.cdr.?);
                     },
                     atom.sym => {
                         var funcname = arg.?.cell.car.?.sym.items;
@@ -465,10 +470,13 @@ pub fn do_funcall(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     return try eval(e, a, p);
 }
 
-pub fn do_lambda(_: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+pub fn do_lambda(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var p = try atom.init(a);
     p.* = atom{
-        .lambda = args.cell,
+        .lambda = .{
+            .e = e,
+            .cell = args.cell,
+        },
     };
     return p;
 }

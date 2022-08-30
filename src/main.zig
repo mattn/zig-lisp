@@ -66,6 +66,7 @@ const atom = union(enum) {
     sym: std.ArrayList(u8),
     num: i64,
     str: std.ArrayList(u8),
+    lambda: cell,
     func: *const function,
     quote: ?*atom,
     cell: cell,
@@ -87,6 +88,19 @@ const atom = union(enum) {
         switch (self.*) {
             .sym => |v| v.deinit(),
             .str => |v| v.deinit(),
+            .lambda => |v| {
+                if (!final) {
+                    return;
+                }
+                if (v.car != null) {
+                    v.car.?.deinit(a, final);
+                    self.cell.car = null;
+                }
+                if (v.cdr != null) {
+                    v.cdr.?.deinit(a, final);
+                    self.cell.cdr = null;
+                }
+            },
             .cell => |v| {
                 if (!final) {
                     return;
@@ -140,6 +154,13 @@ const atom = union(enum) {
             },
             .func => |v| try w.writeAll(v.name),
             .num => |v| try w.print("{}", .{v}),
+            .lambda => |v| {
+                try w.writeAll("(lambda ");
+                try v.cdr.?.cell.car.?.cell.cdr.?.print(w, quoted);
+                try w.writeByte(' ');
+                try v.cdr.?.cell.car.?.print(w, quoted);
+                try w.writeByte(')');
+            },
             .cell => |v| {
                 try w.writeByte('(');
                 try v.car.?.print(w, false);
@@ -172,13 +193,12 @@ const atom = union(enum) {
 };
 
 fn debug(arg: *atom) !void {
-    try arg.println(std.io.getStdOut().writer());
+    try arg.println(std.io.getStdOut().writer(), false);
 }
 
 fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
     var arg: ?*atom = root;
 
-    //try debug(arg.?);
     return switch (arg.?.*) {
         atom.sym => |v| blk: {
             var p = e;
@@ -202,11 +222,28 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             };
             break :blk na;
         },
+        atom.lambda => try arg.?.copy(a),
         atom.cell => blk: {
             var last = arg.?;
             while (true) {
                 last = try switch (arg.?.cell.car.?.*) {
                     atom.func => (arg.?.cell.car.?.func.ptr)(e, a, arg.?.cell.cdr.?),
+                    atom.lambda => {
+                        var newe = e.child();
+                        defer newe.deinit();
+                        newe.p = e;
+                        var pa = arg.?.cell.car.?.lambda.car;
+                        var fa = arg.?.cell.cdr;
+                        while (pa != null) {
+                            try newe.v.put(
+                                pa.?.cell.car.?.sym.items,
+                                fa.?.cell.car.?,
+                            );
+                            pa = pa.?.cell.cdr;
+                            fa = fa.?.cell.cdr;
+                        }
+                        break :blk eval(&newe, a, arg.?.cell.car.?.lambda.cdr.?);
+                    },
                     atom.sym => {
                         var funcname = arg.?.cell.car.?.sym.items;
                         for (builtins) |b, i| {
@@ -276,11 +313,11 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var val = try eval(e, a, arg.cell.car.?);
-    defer val.deinit(a, false);
     if (val.* != atom.num) {
         try e.raise("invalid type for -");
     }
     var num: i64 = val.num;
+    val.deinit(a, false);
     if (arg.cell.cdr == null) {
         var na = try atom.init(a);
         na.* = atom{
@@ -415,6 +452,27 @@ pub fn do_concatenate(e: *env, a: std.mem.Allocator, args: *atom) LispError!*ato
     unreachable;
 }
 
+pub fn do_funcall(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var l = try eval(e, a, args.cell.car.?);
+    var p = try atom.init(a);
+    p.* = atom{
+        .cell = cell{
+            .car = l,
+            .cdr = args.cell.cdr,
+        },
+    };
+    defer p.deinit(a, false);
+    return try eval(e, a, p);
+}
+
+pub fn do_lambda(_: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var p = try atom.init(a);
+    p.* = atom{
+        .lambda = args.cell,
+    };
+    return p;
+}
+
 pub fn do_length(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = try eval(e, a, args);
     defer arg.deinit(a, false);
@@ -442,6 +500,8 @@ var builtins = [_]function{
     .{ .name = "setq", .ptr = &do_setq },
     .{ .name = "defun", .ptr = &do_defun },
     .{ .name = "length", .ptr = &do_length },
+    .{ .name = "lambda", .ptr = &do_lambda },
+    .{ .name = "funcall", .ptr = &do_funcall },
     .{ .name = "concatenate", .ptr = &do_concatenate },
 };
 
@@ -590,8 +650,14 @@ fn parseNumber(a: std.mem.Allocator, br: anytype) LispError!*atom {
 fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
     try skipWhilte(br);
     const r = br.reader();
-    const byte = try r.readByte();
+    var byte = try r.readByte();
     try br.putBackByte(byte);
+    while (byte == ';') {
+        try br.reader().skipUntilDelimiterOrEof('\n');
+        byte = try r.readByte();
+        try br.putBackByte(byte);
+    }
+
     return switch (byte) {
         '(' => try parseCell(a, br),
         '0'...'9', '-', '+' => try parseNumber(a, br),

@@ -729,10 +729,10 @@ pub fn main() anyerror!void {
         var f = try std.fs.cwd().openFile(arg, .{});
         defer f.close();
         var bufr = reader(f.reader());
-        try run(a, &bufr);
+        try run(a, bufr);
     } else {
         var bufr = reader(std.io.getStdIn().reader());
-        try run(a, &bufr);
+        try run(a, bufr);
     }
 }
 
@@ -752,7 +752,8 @@ test "basic test" {
         .{ .input = "(length '(1 2 3))", .want = "3\n" },
     };
     for (tests) |t| {
-        var br = reader(std.io.fixedBufferStream(t.input).reader());
+        var fs = std.io.fixedBufferStream(t.input);
+        var br = reader(fs.reader());
 
         var e = env.init(a);
         defer e.deinit();

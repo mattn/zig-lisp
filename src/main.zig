@@ -294,7 +294,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                                 while (pa != null) {
                                     try newe.v.put(
                                         pa.?.cell.car.?.sym.items,
-                                        fa.?.cell.car.?,
+                                        try eval(e, a, fa.?.cell.car.?),
                                     );
                                     pa = pa.?.cell.cdr;
                                     fa = fa.?.cell.cdr;

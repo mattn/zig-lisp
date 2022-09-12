@@ -34,6 +34,20 @@ const env = struct {
         };
     }
 
+    pub fn get(self: *Self, key: []const u8) !?*atom {
+        var e: *env = self;
+        while (true) {
+            if (e.v.get(key)) |ev| {
+                return try ev.copy(self.a);
+            }
+            if (e.p == null) {
+                break;
+            }
+            e = e.p.?;
+        }
+        return null;
+    }
+
     pub fn child(self: *Self) Self {
         var c = Self{
             .a = self.a,
@@ -69,6 +83,7 @@ const env = struct {
 
 const atom = union(enum) {
     sym: std.ArrayList(u8),
+    bool: bool,
     num: i64,
     str: std.ArrayList(u8),
     lambda: lambda,
@@ -124,6 +139,7 @@ const atom = union(enum) {
                     v.?.deinit(a, true);
                 }
             },
+            .bool => {},
             .num => {},
             .func => {},
             .none => {},
@@ -137,6 +153,11 @@ const atom = union(enum) {
     }
 
     pub fn print(self: @This(), w: anytype, quoted: bool) LispError!void {
+        try w.writeByte('\n');
+        try self.princ(w, quoted);
+    }
+
+    pub fn princ(self: @This(), w: anytype, quoted: bool) LispError!void {
         switch (self) {
             .none => try w.writeAll("null"),
             .sym => |v| try w.writeAll(v.items),
@@ -158,17 +179,24 @@ const atom = union(enum) {
                 }
             },
             .func => |v| try w.writeAll(v.name),
+            .bool => |v| {
+                if (v) {
+                    try w.writeAll("T");
+                } else {
+                    try w.writeAll("nil");
+                }
+            },
             .num => |v| try w.print("{}", .{v}),
             .lambda => |v| {
                 try w.writeAll("(lambda ");
-                try v.cell.cdr.?.cell.car.?.cell.cdr.?.print(w, quoted);
+                try v.cell.cdr.?.cell.car.?.cell.cdr.?.princ(w, quoted);
                 try w.writeByte(' ');
-                try v.cell.cdr.?.cell.car.?.print(w, quoted);
+                try v.cell.cdr.?.cell.car.?.princ(w, quoted);
                 try w.writeByte(')');
             },
             .cell => |v| {
                 try w.writeByte('(');
-                try v.car.?.print(w, false);
+                try v.car.?.princ(w, false);
                 try w.writeByte(' ');
                 if (v.cdr == null) {
                     return;
@@ -177,7 +205,7 @@ const atom = union(enum) {
                 while (a != null) {
                     if (a.?.cell.car == null)
                         break;
-                    try a.?.cell.car.?.print(w, quoted);
+                    try a.?.cell.car.?.princ(w, quoted);
                     if (a.?.cell.cdr == null) {
                         break;
                     }
@@ -191,7 +219,7 @@ const atom = union(enum) {
             },
             .quote => |v| {
                 try w.writeByte('\x27');
-                try v.?.print(w, quoted);
+                try v.?.princ(w, quoted);
             },
         }
     }
@@ -209,14 +237,14 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             var p = e;
             while (true) {
                 if (p.v.get(v.items)) |ev| {
-                    break :blk try ev.copy(a);
+                    break :blk try eval(e, a, try ev.copy(a));
                 }
                 if (p.p == null) {
                     break;
                 }
                 p = p.p.?;
             }
-            break :blk error.RuntimeError;
+            try e.raise("invalid symbol");
         },
         atom.str => |v| blk: {
             var bytes = std.ArrayList(u8).init(a);
@@ -256,7 +284,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                                 break :blk (builtins[i].ptr)(e, a, arg.?.cell.cdr.?);
                             }
                         }
-                        if (e.v.get(funcname)) |f| {
+                        if (try e.get(funcname)) |f| {
                             if (f.cell.cdr.?.* == atom.cell) {
                                 var newe = e.child();
                                 defer newe.deinit();
@@ -286,6 +314,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             unreachable;
         },
         atom.quote => |v| v.?,
+        atom.bool => try arg.?.copy(a),
         atom.num => try arg.?.copy(a),
         atom.func => try arg.?.copy(a),
         atom.none => try arg.?.copy(a),
@@ -408,6 +437,62 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     unreachable;
 }
 
+pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+    var lhs = try eval(e, a, arg.cell.car.?);
+    defer lhs.deinit(a, false);
+    if (lhs.* != atom.num) {
+        try e.raise("invalid type for <");
+    }
+    arg = arg.cell.cdr.?;
+    var rhs = try eval(e, a, arg.cell.car.?);
+    defer rhs.deinit(a, false);
+    if (rhs.* != atom.num) {
+        try e.raise("invalid type for <");
+    }
+    var na = try atom.init(a);
+    na.* = atom{
+        .bool = lhs.num < rhs.num,
+    };
+    return na;
+}
+
+pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+    var lhs = try eval(e, a, arg.cell.car.?);
+    defer lhs.deinit(a, false);
+    if (lhs.* != atom.num) {
+        try e.raise("invalid type for >");
+    }
+    arg = arg.cell.cdr.?;
+    var rhs = try eval(e, a, arg.cell.car.?);
+    defer rhs.deinit(a, false);
+    if (rhs.* != atom.num) {
+        try e.raise("invalid type for >");
+    }
+    var na = try atom.init(a);
+    na.* = atom{
+        .bool = lhs.num > rhs.num,
+    };
+    return na;
+}
+
+pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+    var cond = try eval(e, a, arg.cell.car.?);
+    defer cond.deinit(a, false);
+    if (cond.* != atom.bool) {
+        try e.raise("invalid type for if");
+    }
+
+    arg = arg.cell.cdr.?;
+    if (cond.bool) {
+        return try eval(e, a, arg.cell.car.?);
+    }
+    arg = arg.cell.cdr.?;
+    return try eval(e, a, arg.cell.car.?);
+}
+
 pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var val = try eval(e, a, arg.cell.cdr.?.cell.car.?);
@@ -428,9 +513,15 @@ pub fn do_defun(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     return p;
 }
 
+pub fn do_princ(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var result = try eval(e, a, args);
+    try result.princ(std.io.getStdOut().writer(), false);
+    return result;
+}
+
 pub fn do_print(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var result = try eval(e, a, args);
-    try result.println(std.io.getStdOut().writer(), false);
+    try result.print(std.io.getStdOut().writer(), false);
     return result;
 }
 
@@ -504,6 +595,10 @@ var builtins = [_]function{
     .{ .name = "-", .ptr = &do_sub },
     .{ .name = "*", .ptr = &do_mat },
     .{ .name = "/", .ptr = &do_mul },
+    .{ .name = "<", .ptr = &do_lt },
+    .{ .name = ">", .ptr = &do_gt },
+    .{ .name = "if", .ptr = &do_if },
+    .{ .name = "princ", .ptr = &do_princ },
     .{ .name = "print", .ptr = &do_print },
     .{ .name = "setq", .ptr = &do_setq },
     .{ .name = "defun", .ptr = &do_defun },
@@ -565,7 +660,7 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
     errdefer bytes.deinit();
     loop: while (true) {
         switch (r.readByte() catch 0) {
-            'a'...'z', '0'...'9', '-', '+' => |v| {
+            'a'...'z', '0'...'9', '-', '+', '>', '<' => |v| {
                 try bytes.append(v);
             },
             else => |v| {
@@ -669,7 +764,7 @@ fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
     return switch (byte) {
         '(' => try parseCell(a, br),
         '0'...'9', '-', '+' => try parseNumber(a, br),
-        'a'...'z' => try parseIdent(a, br),
+        'a'...'z', '>', '<' => try parseIdent(a, br),
         '\x27' => try parseQuote(a, br),
         '"' => try parseString(a, br),
         else => error.SyntaxError,

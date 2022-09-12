@@ -45,7 +45,8 @@ const env = struct {
             }
             e = e.p.?;
         }
-        return null;
+        try e.raise("invalid symbol");
+        unreachable;
     }
 
     pub fn child(self: *Self) Self {

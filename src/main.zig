@@ -680,7 +680,7 @@ fn reader(r: anytype) bufReader(@TypeOf(r)) {
     return std.io.peekStream(2, r);
 }
 
-fn bufReader(r: anytype) type {
+fn bufReader(comptime r: anytype) type {
     return std.io.PeekStream(std.fifo.LinearFifoBufferType{ .Static = 2 }, r);
 }
 
@@ -729,10 +729,10 @@ pub fn main() anyerror!void {
         var f = try std.fs.cwd().openFile(arg, .{});
         defer f.close();
         var bufr = reader(f.reader());
-        try run(a, bufr);
+        try run(a, &bufr);
     } else {
         var bufr = reader(std.io.getStdIn().reader());
-        try run(a, bufr);
+        try run(a, &bufr);
     }
 }
 

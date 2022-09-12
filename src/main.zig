@@ -815,19 +815,19 @@ fn run(a: std.mem.Allocator, br: anytype) !void {
 pub fn main() anyerror!void {
     const a = std.heap.page_allocator;
 
-    var args = try std.process.argsWithAllocator(a);
-    defer args.deinit();
+    var args = try std.process.argsAlloc(a);
+    defer std.process.argsFree(a, args);
 
-    _ = args.next();
-
-    while (args.next()) |arg| {
-        var f = try std.fs.cwd().openFile(arg, .{});
-        defer f.close();
-        var bufr = reader(f.reader());
-        try run(a, &bufr);
-    } else {
+    if (args.len == 1) {
         var bufr = reader(std.io.getStdIn().reader());
         try run(a, &bufr);
+    } else {
+        for (args[1..]) |arg| {
+            var f = try std.fs.cwd().openFile(arg, .{});
+            defer f.close();
+            var bufr = reader(f.reader());
+            try run(a, &bufr);
+        }
     }
 }
 

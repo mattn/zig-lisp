@@ -38,7 +38,7 @@ const env = struct {
         var e: *env = self;
         while (true) {
             if (e.v.get(key)) |ev| {
-                return try ev.copy(self.a);
+                return ev;
             }
             if (e.p == null) {
                 break;
@@ -237,7 +237,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             var p = e;
             while (true) {
                 if (p.v.get(v.items)) |ev| {
-                    break :blk try eval(e, a, try ev.copy(a));
+                    break :blk try eval(e, a, ev);
                 }
                 if (p.p == null) {
                     break;
@@ -861,7 +861,8 @@ test "basic test" {
         loop: while (true) {
             if (parse(a, &br)) |root| {
                 var result = try eval(&e, a, root);
-                try result.println(bytes.writer(), false);
+                try result.princ(bytes.writer(), false);
+                try bytes.writer().writeByte('\n');
                 try gcValue.append(result);
                 try gcAST.append(root);
             } else |_| {

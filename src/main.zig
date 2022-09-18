@@ -478,6 +478,62 @@ pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     return na;
 }
 
+pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+    var lhs = try eval(e, a, arg.cell.car.?);
+    defer lhs.deinit(a, false);
+    if (lhs.* != atom.num) {
+        try e.raise("invalid type for =");
+    }
+    arg = arg.cell.cdr.?;
+    var rhs = try eval(e, a, arg.cell.car.?);
+    defer rhs.deinit(a, false);
+    if (rhs.* != atom.num) {
+        try e.raise("invalid type for =");
+    }
+    var na = try atom.init(a);
+    na.* = atom{
+        .bool = lhs.num == rhs.num,
+    };
+    return na;
+}
+
+pub fn do_mod(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+    var lhs = try eval(e, a, arg.cell.car.?);
+    defer lhs.deinit(a, false);
+    if (lhs.* != atom.num) {
+        try e.raise("invalid type for mod");
+    }
+    arg = arg.cell.cdr.?;
+    var rhs = try eval(e, a, arg.cell.car.?);
+    defer rhs.deinit(a, false);
+    if (rhs.* != atom.num) {
+        try e.raise("invalid type for mod");
+    }
+    var na = try atom.init(a);
+    na.* = atom{
+        .num = @mod(lhs.num, rhs.num),
+    };
+    return na;
+}
+
+// pub fn do_cond(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+//     var arg = args;
+//     var cond = try eval(e, a, arg.cell.car.?);
+//     defer cond.deinit(a, false);
+//     if (cond.* != atom.bool) {
+//         try e.raise("invalid type for cond");
+//     }
+//
+//     arg = arg.cell.cdr.?;
+//     if (cond.bool) {
+//         return try eval(e, a, arg.cell.car.?);
+//     }
+//     arg = arg.cell.cdr.?;
+//     return try eval(e, a, arg.cell.car.?);
+// }
+
 pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var cond = try eval(e, a, arg.cell.car.?);
@@ -598,6 +654,9 @@ var builtins = [_]function{
     .{ .name = "/", .ptr = &do_mul },
     .{ .name = "<", .ptr = &do_lt },
     .{ .name = ">", .ptr = &do_gt },
+    .{ .name = "=", .ptr = &do_eq },
+    .{ .name = "mod", .ptr = &do_mod },
+    //.{ .name = "cond", .ptr = &do_cond },
     .{ .name = "if", .ptr = &do_if },
     .{ .name = "princ", .ptr = &do_princ },
     .{ .name = "print", .ptr = &do_print },
@@ -796,6 +855,9 @@ fn run(a: std.mem.Allocator, br: anytype) !void {
         gcValue.deinit();
     }
     while (true) {
+        if (std.io.getStdIn().isTty()) {
+            try std.io.getStdErr().writer().writeAll("> ");
+        }
         if (parse(a, br)) |root| {
             if (eval(&e, a, root)) |result| {
                 try gcValue.append(result);
@@ -804,11 +866,14 @@ fn run(a: std.mem.Allocator, br: anytype) !void {
                 return;
             }
             try gcAST.append(root);
+            try std.io.getStdErr().writer().writeAll("\n");
         } else |err| {
             if (err == error.EndOfStream)
                 break;
             try std.io.getStdErr().writer().print("{}\n", .{err});
-            return err;
+            if (!std.io.getStdIn().isTty()) {
+                return err;
+            }
         }
     }
 }

@@ -290,20 +290,23 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                                 var newe = e.child();
                                 defer newe.deinit();
                                 newe.p = e;
-                                var pa = f.cell.cdr.?.cell.car;
-                                var fa = arg.?.cell.cdr;
-                                while (pa != null) {
-                                    try newe.v.put(
-                                        pa.?.cell.car.?.sym.items,
-                                        try eval(e, a, fa.?.cell.car.?),
-                                    );
-                                    pa = pa.?.cell.cdr;
-                                    fa = fa.?.cell.cdr;
+                                if (f.cell.cdr != null) {
+                                    var pa = f.cell.cdr.?.cell.car;
+                                    var fa = arg.?.cell.cdr;
+                                    while (pa != null and fa != null) {
+                                        try newe.v.put(
+                                            pa.?.cell.car.?.sym.items,
+                                            try eval(e, a, fa.?.cell.car.?),
+                                        );
+                                        pa = pa.?.cell.cdr;
+                                        fa = fa.?.cell.cdr;
+                                    }
                                 }
                                 break :blk eval(&newe, a, f.cell.cdr.?.cell.cdr.?.cell.car.?);
                             }
                         }
-                        break :blk error.RuntimeError;
+                        try e.raise("invalid function");
+                        break :blk undefined;
                     },
                     else => eval(e, a, arg.?.cell.car.?),
                 };
@@ -314,7 +317,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             }
             unreachable;
         },
-        atom.quote => |v| v.?,
+        atom.quote => |v| eval(e, a, v.?),
         atom.bool => try arg.?.copy(a),
         atom.num => try arg.?.copy(a),
         atom.func => try arg.?.copy(a),
@@ -518,21 +521,56 @@ pub fn do_mod(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     return na;
 }
 
-// pub fn do_cond(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-//     var arg = args;
-//     var cond = try eval(e, a, arg.cell.car.?);
-//     defer cond.deinit(a, false);
-//     if (cond.* != atom.bool) {
-//         try e.raise("invalid type for cond");
-//     }
-//
-//     arg = arg.cell.cdr.?;
-//     if (cond.bool) {
-//         return try eval(e, a, arg.cell.car.?);
-//     }
-//     arg = arg.cell.cdr.?;
-//     return try eval(e, a, arg.cell.car.?);
-// }
+pub fn do_cond(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+
+    while (true) {
+        var cond = try eval(e, a, arg.cell.car.?.cell.car.?);
+        if (cond.* != atom.bool) {
+            try e.raise("invalid type for cond");
+        }
+        defer cond.deinit(a, false);
+
+        if (cond.bool) {
+            return try eval(e, a, arg.cell.car.?.cell.cdr.?.cell.car.?);
+        }
+        arg = arg.cell.cdr.?;
+    }
+    var na = try atom.init(a);
+    na.* = atom{
+        .bool = false,
+    };
+    return na;
+}
+
+pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+
+    var name = arg.cell.car.?.cell.car;
+    var count = try eval(e, a, arg.cell.car.?.cell.cdr.?);
+    if (count.* != atom.num) {
+        try e.raise("invalid type for dotimes");
+    }
+    var newe = e.child();
+    defer newe.deinit();
+
+    var i: u32 = 0;
+    while (i < count.num) : (i += 1) {
+        var nv = try atom.init(a);
+        defer nv.deinit(a, false);
+        nv.* = atom{
+            .num = i,
+        };
+        try newe.v.put(name.?.sym.items, nv);
+        var value = try eval(&newe, a, arg.cell.cdr.?.cell.car.?);
+        defer value.deinit(a, false);
+    }
+    var na = try atom.init(a);
+    na.* = atom{
+        .bool = false,
+    };
+    return na;
+}
 
 pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
@@ -656,7 +694,8 @@ var builtins = [_]function{
     .{ .name = ">", .ptr = &do_gt },
     .{ .name = "=", .ptr = &do_eq },
     .{ .name = "mod", .ptr = &do_mod },
-    //.{ .name = "cond", .ptr = &do_cond },
+    .{ .name = "cond", .ptr = &do_cond },
+    .{ .name = "dotimes", .ptr = &do_dotimes },
     .{ .name = "if", .ptr = &do_if },
     .{ .name = "princ", .ptr = &do_princ },
     .{ .name = "print", .ptr = &do_print },
@@ -720,7 +759,7 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
     errdefer bytes.deinit();
     loop: while (true) {
         switch (r.readByte() catch 0) {
-            'a'...'z', '0'...'9', '-', '+', '>', '<' => |v| {
+            'a'...'z', '0'...'9', '-', '+', '>', '<', '=' => |v| {
                 try bytes.append(v);
             },
             else => |v| {
@@ -741,7 +780,7 @@ fn parseQuote(a: std.mem.Allocator, br: anytype) LispError!*atom {
     var byte = try r.readByte();
     if (byte != '\x27') return error.SyntaxError;
 
-    var c = try parseCell(a, br);
+    var c = try parse(a, br);
     var p = try atom.init(a);
     p.* = atom{ .quote = c };
     return p;
@@ -820,11 +859,21 @@ fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
         byte = try r.readByte();
         try br.putBackByte(byte);
     }
+    if (byte == ')') {
+        var na = try atom.init(a);
+        na.* = atom{
+            .cell = cell{
+                .car = null,
+                .cdr = null,
+            },
+        };
+        return na;
+    }
 
     return switch (byte) {
         '(' => try parseCell(a, br),
         '0'...'9', '-', '+' => try parseNumber(a, br),
-        'a'...'z', '>', '<' => try parseIdent(a, br),
+        'a'...'z', '>', '<', '=' => try parseIdent(a, br),
         '\x27' => try parseQuote(a, br),
         '"' => try parseString(a, br),
         else => error.SyntaxError,
@@ -839,9 +888,15 @@ fn bufReader(comptime r: anytype) type {
     return std.io.PeekStream(std.fifo.LinearFifoBufferType{ .Static = 2 }, r);
 }
 
-fn run(a: std.mem.Allocator, br: anytype) !void {
+fn run(a: std.mem.Allocator, br: anytype, repl: bool) !void {
     var e = env.init(a);
     defer e.deinit();
+
+    var t = try atom.init(a);
+    t.* = atom{
+        .bool = true,
+    };
+    try e.v.put("t", t);
 
     var gcValue = std.ArrayList(*atom).init(a);
     var gcAST = std.ArrayList(*atom).init(a);
@@ -855,7 +910,7 @@ fn run(a: std.mem.Allocator, br: anytype) !void {
         gcValue.deinit();
     }
     while (true) {
-        if (std.io.getStdIn().isTty()) {
+        if (repl and std.io.getStdIn().isTty()) {
             try std.io.getStdErr().writer().writeAll("> ");
         }
         if (parse(a, br)) |root| {
@@ -870,8 +925,8 @@ fn run(a: std.mem.Allocator, br: anytype) !void {
         } else |err| {
             if (err == error.EndOfStream)
                 break;
-            try std.io.getStdErr().writer().print("{}\n", .{err});
-            if (!std.io.getStdIn().isTty()) {
+            try e.printerr(err);
+            if (!repl or !std.io.getStdIn().isTty()) {
                 return err;
             }
         }
@@ -886,13 +941,13 @@ pub fn main() anyerror!void {
 
     if (args.len == 1) {
         var bufr = reader(std.io.getStdIn().reader());
-        try run(a, &bufr);
+        try run(a, &bufr, true);
     } else {
         for (args[1..]) |arg| {
             var f = try std.fs.cwd().openFile(arg, .{});
             defer f.close();
             var bufr = reader(f.reader());
-            try run(a, &bufr);
+            try run(a, &bufr, false);
         }
     }
 }

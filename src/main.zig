@@ -50,7 +50,7 @@ const env = struct {
     }
 
     pub fn child(self: *Self) Self {
-        var c = Self{
+        const c = Self{
             .a = self.a,
             .v = std.StringArrayHashMap(*atom).init(self.a),
             .p = self,
@@ -100,7 +100,7 @@ const atom = union(enum) {
     }
 
     pub fn copy(self: *Self, a: std.mem.Allocator) !*Self {
-        var n = try atom.init(a);
+        const n = try atom.init(a);
         n.* = self.*;
         return n;
     }
@@ -246,11 +246,12 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                 p = p.p.?;
             }
             try e.raise("invalid symbol");
+            break :blk root;
         },
         atom.str => |v| blk: {
             var bytes = std.ArrayList(u8).init(a);
             try bytes.writer().writeAll(v.items);
-            var na = try atom.init(a);
+            const na = try atom.init(a);
             na.* = atom{
                 .str = bytes,
             };
@@ -279,8 +280,8 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                         break :blk eval(&newe, a, arg.?.cell.car.?.lambda.cell.cdr.?);
                     },
                     atom.sym => {
-                        var funcname = arg.?.cell.car.?.sym.items;
-                        for (builtins) |b, i| {
+                        const funcname = arg.?.cell.car.?.sym.items;
+                        for (builtins, 0..) |b, i| {
                             if (std.mem.eql(u8, b.name, funcname)) {
                                 break :blk (builtins[i].ptr)(e, a, arg.?.cell.cdr.?);
                             }
@@ -337,7 +338,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             try e.raise("invalid type for +");
         }
         if (arg.cell.cdr == null) {
-            var na = try atom.init(a);
+            const na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -357,7 +358,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num: i64 = val.num;
     val.deinit(a, false);
     if (arg.cell.cdr == null) {
-        var na = try atom.init(a);
+        const na = try atom.init(a);
         na.* = atom{
             .num = num,
         };
@@ -373,7 +374,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             try e.raise("invalid type for -");
         }
         if (arg.cell.cdr == null) {
-            var na = try atom.init(a);
+            const na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -395,7 +396,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             try e.raise("invalid type for *");
         }
         if (arg.cell.cdr == null) {
-            var na = try atom.init(a);
+            const na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -415,7 +416,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     }
     var num: i64 = val.num;
     if (arg.cell.cdr == null) {
-        var na = try atom.init(a);
+        const na = try atom.init(a);
         na.* = atom{
             .num = num,
         };
@@ -431,7 +432,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         }
         val.deinit(a, false);
         if (arg.cell.cdr == null) {
-            var na = try atom.init(a);
+            const na = try atom.init(a);
             na.* = atom{
                 .num = num,
             };
@@ -454,7 +455,7 @@ pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     if (rhs.* != atom.num) {
         try e.raise("invalid type for <");
     }
-    var na = try atom.init(a);
+    const na = try atom.init(a);
     na.* = atom{
         .bool = lhs.num < rhs.num,
     };
@@ -474,7 +475,7 @@ pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     if (rhs.* != atom.num) {
         try e.raise("invalid type for >");
     }
-    var na = try atom.init(a);
+    const na = try atom.init(a);
     na.* = atom{
         .bool = lhs.num > rhs.num,
     };
@@ -494,7 +495,7 @@ pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     if (rhs.* != atom.num) {
         try e.raise("invalid type for =");
     }
-    var na = try atom.init(a);
+    const na = try atom.init(a);
     na.* = atom{
         .bool = lhs.num == rhs.num,
     };
@@ -514,7 +515,7 @@ pub fn do_mod(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     if (rhs.* != atom.num) {
         try e.raise("invalid type for mod");
     }
-    var na = try atom.init(a);
+    const na = try atom.init(a);
     na.* = atom{
         .num = @mod(lhs.num, rhs.num),
     };
@@ -536,7 +537,7 @@ pub fn do_cond(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         }
         arg = arg.cell.cdr.?;
     }
-    var na = try atom.init(a);
+    const na = try atom.init(a);
     na.* = atom{
         .bool = false,
     };
@@ -544,10 +545,10 @@ pub fn do_cond(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var arg = args;
+    const arg = args;
 
-    var name = arg.cell.car.?.cell.car;
-    var count = try eval(e, a, arg.cell.car.?.cell.cdr.?);
+    const name = arg.cell.car.?.cell.car;
+    const count = try eval(e, a, arg.cell.car.?.cell.cdr.?);
     if (count.* != atom.num) {
         try e.raise("invalid type for dotimes");
     }
@@ -565,7 +566,7 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         var value = try eval(&newe, a, arg.cell.cdr.?.cell.car.?);
         defer value.deinit(a, false);
     }
-    var na = try atom.init(a);
+    const na = try atom.init(a);
     na.* = atom{
         .bool = false,
     };
@@ -589,19 +590,19 @@ pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var arg = args;
-    var val = try eval(e, a, arg.cell.cdr.?.cell.car.?);
-    var name = arg.cell.car.?;
+    const arg = args;
+    const val = try eval(e, a, arg.cell.cdr.?.cell.car.?);
+    const name = arg.cell.car.?;
     try e.v.put(name.sym.items, val);
     return val;
 }
 
 pub fn do_defun(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var name = args.cell.car.?;
+    const name = args.cell.car.?;
     try e.v.put(name.sym.items, args);
     var bytes = std.ArrayList(u8).init(a);
     try bytes.writer().writeAll(name.sym.items);
-    var p = try atom.init(a);
+    const p = try atom.init(a);
     p.* = atom{
         .sym = bytes,
     };
@@ -632,7 +633,7 @@ pub fn do_concatenate(e: *env, a: std.mem.Allocator, args: *atom) LispError!*ato
             try e.raise("invalid type for concatenate");
         }
         if (arg.cell.cdr == null) {
-            var na = try atom.init(a);
+            const na = try atom.init(a);
             na.* = atom{
                 .str = bytes,
             };
@@ -644,7 +645,7 @@ pub fn do_concatenate(e: *env, a: std.mem.Allocator, args: *atom) LispError!*ato
 }
 
 pub fn do_funcall(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var l = try eval(e, a, args.cell.car.?);
+    const l = try eval(e, a, args.cell.car.?);
     var p = try atom.init(a);
     p.* = atom{
         .cell = cell{
@@ -657,7 +658,7 @@ pub fn do_funcall(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_lambda(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var p = try atom.init(a);
+    const p = try atom.init(a);
     p.* = atom{
         .lambda = .{
             .e = e,
@@ -674,7 +675,7 @@ pub fn do_length(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     while (true) {
         n += 1;
         if (arg.cell.cdr == null) {
-            var na = try atom.init(a);
+            const na = try atom.init(a);
             na.* = atom{
                 .num = n,
             };
@@ -711,7 +712,7 @@ const SyntaxError = error{};
 const RuntimeError = error{};
 const ParseIntError = std.fmt.ParseIntError;
 const WriteError = std.os.WriteError;
-const LispError = error{ RuntimeError, SyntaxError, OutOfMemory, EndOfStream, NoError, InvalidCharacter, IsDir, ConnectionTimedOut, NotOpenForReading } || ParseIntError || WriteError;
+const LispError = error{ RuntimeError, SyntaxError, OutOfMemory, EndOfStream, NoError, InvalidCharacter, IsDir, ConnectionTimedOut, NotOpenForReading, SocketNotConnected, NetNameDeleted } || ParseIntError || WriteError;
 
 fn skipWhilte(br: anytype) LispError!void {
     const r = br.reader();
@@ -746,7 +747,7 @@ fn parseString(a: std.mem.Allocator, br: anytype) LispError!*atom {
         }
         try bytes.append(byte);
     }
-    var p = try atom.init(a);
+    const p = try atom.init(a);
     p.* = atom{
         .str = bytes,
     };
@@ -768,7 +769,7 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
             },
         }
     }
-    var p = try atom.init(a);
+    const p = try atom.init(a);
     p.* = atom{
         .sym = bytes,
     };
@@ -777,11 +778,11 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
 
 fn parseQuote(a: std.mem.Allocator, br: anytype) LispError!*atom {
     const r = br.reader();
-    var byte = try r.readByte();
+    const byte = try r.readByte();
     if (byte != '\x27') return error.SyntaxError;
 
-    var c = try parse(a, br);
-    var p = try atom.init(a);
+    const c = try parse(a, br);
+    const p = try atom.init(a);
     p.* = atom{ .quote = c };
     return p;
 }
@@ -791,7 +792,7 @@ fn parseCell(a: std.mem.Allocator, br: anytype) LispError!*atom {
     var byte = try r.readByte();
     if (byte != '(') return error.SyntaxError;
 
-    var top = try atom.init(a);
+    const top = try atom.init(a);
     top.* = atom{
         .cell = cell{
             .car = null,
@@ -810,7 +811,7 @@ fn parseCell(a: std.mem.Allocator, br: anytype) LispError!*atom {
         }
         try br.putBackByte(byte);
 
-        var cdr = try atom.init(a);
+        const cdr = try atom.init(a);
         cdr.* = atom{
             .cell = cell{
                 .car = null,
@@ -838,7 +839,7 @@ fn parseNumber(a: std.mem.Allocator, br: anytype) LispError!*atom {
     }
 
     if (std.fmt.parseInt(i64, bytes.items, 10)) |num| {
-        var p = try atom.init(a);
+        const p = try atom.init(a);
         p.* = atom{
             .num = num,
         };
@@ -860,7 +861,7 @@ fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
         try br.putBackByte(byte);
     }
     if (byte == ')') {
-        var na = try atom.init(a);
+        const na = try atom.init(a);
         na.* = atom{
             .cell = cell{
                 .car = null,
@@ -892,7 +893,7 @@ fn run(a: std.mem.Allocator, br: anytype, repl: bool) !void {
     var e = env.init(a);
     defer e.deinit();
 
-    var t = try atom.init(a);
+    const t = try atom.init(a);
     t.* = atom{
         .bool = true,
     };
@@ -953,10 +954,10 @@ pub fn main() anyerror!void {
 }
 
 test "basic test" {
-    var a = std.testing.allocator;
+    const a = std.testing.allocator;
 
     const T = struct { input: []const u8, want: []const u8 };
-    var tests = [_]T{
+    const tests = [_]T{
         .{ .input = "1", .want = "1\n" },
         .{ .input = "(+ 1 2)", .want = "3\n" },
         .{ .input = "(setq a 1)", .want = "1\n" },

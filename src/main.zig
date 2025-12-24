@@ -1069,6 +1069,60 @@ fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
 //     return std.io.PeekStream(std.fifo.LinearFifoBufferType{ .Static = 2 }, r);
 // }
 
+// Helper function to safely free a result atom that might be in env
+fn freeResult(result: *atom, e: *env, a: std.mem.Allocator) void {
+    var result_in_env = false;
+    var it = e.v.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == result) {
+            result_in_env = true;
+            break;
+        }
+    }
+    if (!result_in_env) {
+        result.deinit(a, true);
+    }
+}
+
+// Helper function to safely free a root atom that might have children in env
+fn freeRoot(root: *atom, e: *env, a: std.mem.Allocator) void {
+    var root_or_children_in_env = false;
+    var it = e.v.iterator();
+    while (it.next()) |entry| {
+        const env_atom = entry.value_ptr.*;
+        if (env_atom == root) {
+            root_or_children_in_env = true;
+            break;
+        }
+        // Check if root's children are in env (for defun case)
+        if (root.* == .cell) {
+            if (root.cell.cdr == env_atom or root.cell.car == env_atom) {
+                root_or_children_in_env = true;
+                break;
+            }
+        }
+    }
+    
+    if (!root_or_children_in_env) {
+        root.deinit(a, true);
+    } else {
+        // If root's children are in env, detach them before freeing root
+        if (root.* == .cell) {
+            var it2 = e.v.iterator();
+            while (it2.next()) |entry| {
+                const env_atom = entry.value_ptr.*;
+                if (root.cell.cdr == env_atom) {
+                    root.cell.cdr = null;
+                }
+                if (root.cell.car == env_atom) {
+                    root.cell.car = null;
+                }
+            }
+        }
+        root.deinit(a, true);
+    }
+}
+
 fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
     var stream = PeekableStream(@TypeOf(reader)).init(reader);
     const br = &stream;
@@ -1100,48 +1154,15 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
                 try result.println(stdout_stream.writer(), false);
                 const written = stdout_stream.getWritten();
                 _ = try std.fs.File.stdout().writeAll(written);
-                // Check if result is in env (setq stores result in env)
-                var result_in_env = false;
-                var it = e.v.iterator();
-                while (it.next()) |entry| {
-                    if (entry.value_ptr.* == result) {
-                        result_in_env = true;
-                        break;
-                    }
-                }
                 // Free result if not in env
-                if (!result_in_env) {
-                    result.deinit(a, true);
-                }
+                freeResult(result, &e, a);
             } else |err| {
                 try e.printerr(err);
                 return;
             }
             gcASTCount += 1;
-            // Check if root or root's children are in env (defun stores root's children in env)
-            var root_or_children_in_env = false;
-            var it = e.v.iterator();
-            while (it.next()) |entry| {
-                const env_atom = entry.value_ptr.*;
-                if (env_atom == root) {
-                    root_or_children_in_env = true;
-                    break;
-                }
-                // Check if root's children are in env (for defun case)
-                if (root.* == .cell) {
-                    if (root.cell.cdr == env_atom or root.cell.car == env_atom) {
-                        root_or_children_in_env = true;
-                        break;
-                    }
-                }
-            }
             // Free root appropriately
-            if (!root_or_children_in_env) {
-                root.deinit(a, true);
-            } else {
-                // If root or children are in env, use final=false to avoid double free
-                root.deinit(a, false);
-            }
+            freeRoot(root, &e, a);
         } else |err| {
             if (err == error.EndOfStream)
                 break;
@@ -1207,49 +1228,9 @@ test "basic test" {
                 var result = try eval(&e, a, root);
                 try result.princ(output_stream.writer(), false);
                 _ = try output_stream.writer().write("\n");
-                // Check if result or root (or root's children) are in env
-                var result_in_env = false;
-                var root_or_children_in_env = false;
-                var it = e.v.iterator();
-                while (it.next()) |entry| {
-                    const env_atom = entry.value_ptr.*;
-                    if (env_atom == result) {
-                        result_in_env = true;
-                    }
-                    if (env_atom == root) {
-                        root_or_children_in_env = true;
-                    }
-                    // Check if root's children are in env (for defun case)
-                    if (root.* == .cell) {
-                        if (root.cell.cdr == env_atom or root.cell.car == env_atom) {
-                            root_or_children_in_env = true;
-                        }
-                    }
-                }
-                // Free result if not in env
-                if (!result_in_env) {
-                    result.deinit(a, true);
-                }
-                // Free root appropriately
-                if (!root_or_children_in_env) {
-                    root.deinit(a, true);
-                } else {
-                    // If root's children are in env, detach them before freeing root
-                    if (root.* == .cell) {
-                        // Check which children are in env and detach them
-                        var it2 = e.v.iterator();
-                        while (it2.next()) |entry| {
-                            const env_atom = entry.value_ptr.*;
-                            if (root.cell.cdr == env_atom) {
-                                root.cell.cdr = null;
-                            }
-                            if (root.cell.car == env_atom) {
-                                root.cell.car = null;
-                            }
-                        }
-                    }
-                    root.deinit(a, true);
-                }
+                // Free result and root appropriately
+                freeResult(result, &e, a);
+                freeRoot(root, &e, a);
             } else |_| {
                 break :loop;
             }

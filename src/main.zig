@@ -609,6 +609,72 @@ pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     return na;
 }
 
+pub fn do_le(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+    var lhs = try eval(e, a, arg.cell.car.?);
+    defer lhs.deinit(a, true);
+    if (lhs.* != atom.num) {
+        try e.raise("invalid type for <=");
+    }
+    arg = arg.cell.cdr.?;
+    var rhs = try eval(e, a, arg.cell.car.?);
+    defer rhs.deinit(a, true);
+    if (rhs.* != atom.num) {
+        try e.raise("invalid type for <=");
+    }
+    const na = try atom.init(a);
+    na.* = atom{
+        .bool = lhs.num <= rhs.num,
+    };
+    return na;
+}
+
+pub fn do_ge(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = args;
+    var lhs = try eval(e, a, arg.cell.car.?);
+    defer lhs.deinit(a, true);
+    if (lhs.* != atom.num) {
+        try e.raise("invalid type for >=");
+    }
+    arg = arg.cell.cdr.?;
+    var rhs = try eval(e, a, arg.cell.car.?);
+    defer rhs.deinit(a, true);
+    if (rhs.* != atom.num) {
+        try e.raise("invalid type for >=");
+    }
+    const na = try atom.init(a);
+    na.* = atom{
+        .bool = lhs.num >= rhs.num,
+    };
+    return na;
+}
+
+pub fn do_1minus(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = try eval(e, a, args.cell.car.?);
+    defer arg.deinit(a, true);
+    if (arg.* != atom.num) {
+        try e.raise("invalid type for 1-");
+    }
+    const na = try atom.init(a);
+    na.* = atom{
+        .num = arg.num - 1,
+    };
+    return na;
+}
+
+pub fn do_1plus(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    var arg = try eval(e, a, args.cell.car.?);
+    defer arg.deinit(a, true);
+    if (arg.* != atom.num) {
+        try e.raise("invalid type for 1+");
+    }
+    const na = try atom.init(a);
+    na.* = atom{
+        .num = arg.num + 1,
+    };
+    return na;
+}
+
 pub fn do_mod(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
@@ -662,17 +728,25 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var newe = e.child();
     defer newe.deinit();
 
+    const key = try a.dupe(u8, name.?.sym);
     var i: u32 = 0;
     while (i < count.num) : (i += 1) {
-        var nv = try atom.init(a);
-        defer nv.deinit(a, true);
+        // Check if key already exists and free old value
+        if (newe.v.get(key)) |old_val| {
+            old_val.deinit(a, true);
+        }
+        const nv = try atom.init(a);
         nv.* = atom{
-            .num = i,
+            .num = @intCast(i),
         };
-        const key = try a.dupe(u8, name.?.sym);
         try newe.v.put(key, nv);
-        var value = try eval(&newe, a, arg.cell.cdr.?.cell.car.?);
-        defer value.deinit(a, true);
+        // Evaluate all forms in the body
+        var body = arg.cell.cdr;
+        while (body != null) {
+            const value = try eval(&newe, a, body.?.cell.car.?);
+            freeResult(value, &newe, a);
+            body = body.?.cell.cdr;
+        }
     }
     const na = try atom.init(a);
     na.* = atom{
@@ -835,6 +909,10 @@ var builtins = [_]function{
     .{ .name = "<", .ptr = &do_lt },
     .{ .name = ">", .ptr = &do_gt },
     .{ .name = "=", .ptr = &do_eq },
+    .{ .name = "<=", .ptr = &do_le },
+    .{ .name = ">=", .ptr = &do_ge },
+    .{ .name = "1-", .ptr = &do_1minus },
+    .{ .name = "1+", .ptr = &do_1plus },
     .{ .name = "mod", .ptr = &do_mod },
     .{ .name = "cond", .ptr = &do_cond },
     .{ .name = "dotimes", .ptr = &do_dotimes },
@@ -1177,7 +1255,9 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
 var buf: [4096]u8 = undefined;
 
 pub fn main() anyerror!void {
-    const a = std.heap.page_allocator;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const a = gpa.allocator();
 
     var args = try std.process.argsAlloc(a);
     defer std.process.argsFree(a, args);

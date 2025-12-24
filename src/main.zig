@@ -128,6 +128,12 @@ const env = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Free all atoms and keys stored in this environment
+        var it = self.v.iterator();
+        while (it.next()) |entry| {
+            entry.value_ptr.*.deinit(self.a, true);
+            self.a.free(entry.key_ptr.*);
+        }
         self.v.clearAndFree();
         self.v.deinit();
         if (self.err != null) {
@@ -169,25 +175,53 @@ const atom = union(enum) {
 
     pub fn copy(self: *Self, a: std.mem.Allocator) !*Self {
         const n = try atom.init(a);
-        n.* = self.*;
+        n.* = switch (self.*) {
+            .sym => |v| atom{ .sym = try a.dupe(u8, v) },
+            .str => |v| atom{ .str = try a.dupe(u8, v) },
+            .cell => |v| atom{
+                .cell = cell{
+                    .car = if (v.car) |car| try car.copy(a) else null,
+                    .cdr = if (v.cdr) |cdr| try cdr.copy(a) else null,
+                },
+            },
+            .quote => |v| atom{
+                .quote = if (v) |val| try val.copy(a) else null,
+            },
+            .lambda => |v| atom{
+                .lambda = lambda{
+                    .e = v.e,
+                    .cell = cell{
+                        .car = if (v.cell.car) |car| try car.copy(a) else null,
+                        .cdr = if (v.cell.cdr) |cdr| try cdr.copy(a) else null,
+                    },
+                },
+            },
+            else => self.*,
+        };
         return n;
     }
 
     pub fn deinit(self: *Self, a: std.mem.Allocator, final: bool) void {
         switch (self.*) {
-            .sym => |v| a.free(v),
-            .str => |v| a.free(v),
+            .sym => |v| {
+                if (final) {
+                    a.free(v);
+                }
+            },
+            .str => |v| {
+                if (final) {
+                    a.free(v);
+                }
+            },
             .lambda => |v| {
                 if (!final) {
                     return;
                 }
                 if (v.cell.car != null) {
                     v.cell.car.?.deinit(a, final);
-                    self.cell.car = null;
                 }
                 if (v.cell.cdr != null) {
                     v.cell.cdr.?.deinit(a, final);
-                    self.cell.cdr = null;
                 }
             },
             .cell => |v| {
@@ -196,11 +230,9 @@ const atom = union(enum) {
                 }
                 if (v.car != null) {
                     v.car.?.deinit(a, final);
-                    self.cell.car = null;
                 }
                 if (v.cdr != null) {
                     v.cdr.?.deinit(a, final);
-                    self.cell.cdr = null;
                 }
             },
             .quote => |v| {
@@ -213,7 +245,9 @@ const atom = union(enum) {
             .func => {},
             .none => {},
         }
-        a.destroy(self);
+        if (final) {
+            a.destroy(self);
+        }
     }
 
     pub fn println(self: @This(), w: anytype, quoted: bool) LispError!void {
@@ -341,8 +375,9 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                         var pa = arg.?.cell.car.?.lambda.cell.car;
                         var fa = arg.?.cell.cdr;
                         while (pa != null) {
+                            const key = try a.dupe(u8, pa.?.cell.car.?.sym);
                             try newe.v.put(
-                                pa.?.cell.car.?.sym,
+                                key,
                                 try eval(e, a, fa.?.cell.car.?),
                             );
                             pa = pa.?.cell.cdr;
@@ -366,8 +401,9 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                                     var pa = f.cell.cdr.?.cell.car;
                                     var fa = arg.?.cell.cdr;
                                     while (pa != null and fa != null) {
+                                        const key = try a.dupe(u8, pa.?.cell.car.?.sym);
                                         try newe.v.put(
-                                            pa.?.cell.car.?.sym,
+                                            key,
                                             try eval(e, a, fa.?.cell.car.?),
                                         );
                                         pa = pa.?.cell.cdr;
@@ -402,7 +438,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num: i64 = 0;
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, false);
+        defer val.deinit(a, true);
         if (val.* == atom.num) {
             num += val.num;
         } else {
@@ -438,7 +474,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     while (true) {
         arg = arg.cell.cdr.?;
         val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, false);
+        defer val.deinit(a, true);
         if (val.* == atom.num) {
             num -= val.num;
         } else {
@@ -460,7 +496,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num: i64 = 1;
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, false);
+        defer val.deinit(a, true);
         if (val.* == atom.num) {
             num *= val.num;
         } else {
@@ -481,7 +517,7 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var val = try eval(e, a, arg.cell.car.?);
-    defer val.deinit(a, false);
+    defer val.deinit(a, true);
     if (val.* != atom.num) {
         try e.raise("invalid type for /");
     }
@@ -516,13 +552,13 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, false);
+    defer lhs.deinit(a, true);
     if (lhs.* != atom.num) {
         try e.raise("invalid type for <");
     }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, false);
+    defer rhs.deinit(a, true);
     if (rhs.* != atom.num) {
         try e.raise("invalid type for <");
     }
@@ -536,13 +572,13 @@ pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, false);
+    defer lhs.deinit(a, true);
     if (lhs.* != atom.num) {
         try e.raise("invalid type for >");
     }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, false);
+    defer rhs.deinit(a, true);
     if (rhs.* != atom.num) {
         try e.raise("invalid type for >");
     }
@@ -556,13 +592,13 @@ pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, false);
+    defer lhs.deinit(a, true);
     if (lhs.* != atom.num) {
         try e.raise("invalid type for =");
     }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, false);
+    defer rhs.deinit(a, true);
     if (rhs.* != atom.num) {
         try e.raise("invalid type for =");
     }
@@ -576,13 +612,13 @@ pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_mod(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, false);
+    defer lhs.deinit(a, true);
     if (lhs.* != atom.num) {
         try e.raise("invalid type for mod");
     }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, false);
+    defer rhs.deinit(a, true);
     if (rhs.* != atom.num) {
         try e.raise("invalid type for mod");
     }
@@ -601,7 +637,7 @@ pub fn do_cond(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         if (cond.* != atom.bool) {
             try e.raise("invalid type for cond");
         }
-        defer cond.deinit(a, false);
+        defer cond.deinit(a, true);
 
         if (cond.bool) {
             return try eval(e, a, arg.cell.car.?.cell.cdr.?.cell.car.?);
@@ -629,13 +665,14 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var i: u32 = 0;
     while (i < count.num) : (i += 1) {
         var nv = try atom.init(a);
-        defer nv.deinit(a, false);
+        defer nv.deinit(a, true);
         nv.* = atom{
             .num = i,
         };
-        try newe.v.put(name.?.sym, nv);
+        const key = try a.dupe(u8, name.?.sym);
+        try newe.v.put(key, nv);
         var value = try eval(&newe, a, arg.cell.cdr.?.cell.car.?);
-        defer value.deinit(a, false);
+        defer value.deinit(a, true);
     }
     const na = try atom.init(a);
     na.* = atom{
@@ -647,7 +684,7 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var cond = try eval(e, a, arg.cell.car.?);
-    defer cond.deinit(a, false);
+    defer cond.deinit(a, true);
     if (cond.* != atom.bool) {
         try e.raise("invalid type for if");
     }
@@ -664,13 +701,15 @@ pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const arg = args;
     const val = try eval(e, a, arg.cell.cdr.?.cell.car.?);
     const name = arg.cell.car.?;
-    try e.v.put(name.sym, val);
+    const key = try a.dupe(u8, name.sym);
+    try e.v.put(key, val);
     return val;
 }
 
 pub fn do_defun(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const name = args.cell.car.?;
-    try e.v.put(name.sym, args);
+    const key = try a.dupe(u8, name.sym);
+    try e.v.put(key, args);
     const sym_slice = try a.dupe(u8, name.sym);
     const p = try atom.init(a);
     p.* = atom{
@@ -707,7 +746,7 @@ pub fn do_concatenate(e: *env, a: std.mem.Allocator, args: *atom) LispError!*ato
     var temp_arg = args;
     while (true) {
         var val = try eval(e, a, temp_arg.cell.car.?);
-        defer val.deinit(a, false);
+        defer val.deinit(a, true);
         if (val.* == atom.str) {
             total_len += val.str.len;
         } else {
@@ -725,7 +764,7 @@ pub fn do_concatenate(e: *env, a: std.mem.Allocator, args: *atom) LispError!*ato
 
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, false);
+        defer val.deinit(a, true);
         if (val.* == atom.str) {
             @memcpy(result_slice[pos..][0..val.str.len], val.str);
             pos += val.str.len;
@@ -754,7 +793,7 @@ pub fn do_funcall(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             .cdr = args.cell.cdr,
         },
     };
-    defer p.deinit(a, false);
+    defer p.deinit(a, true);
     return try eval(e, a, p);
 }
 
@@ -771,7 +810,8 @@ pub fn do_lambda(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 
 pub fn do_length(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = try eval(e, a, args);
-    defer arg.deinit(a, false);
+    const first_arg = arg;
+    defer first_arg.deinit(a, true);
     var n: i64 = 0;
     while (true) {
         n += 1;
@@ -1039,7 +1079,8 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
     t.* = atom{
         .bool = true,
     };
-    try e.v.put("t", t);
+    const key_t = try a.dupe(u8, "t");
+    try e.v.put(key_t, t);
 
     // Using simple counters instead of ArrayList for compatibility with Zig version
     var gcValueCount: usize = 0;
@@ -1059,15 +1100,48 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
                 try result.println(stdout_stream.writer(), false);
                 const written = stdout_stream.getWritten();
                 _ = try std.fs.File.stdout().writeAll(written);
-                // Deinit result manually since not stored in list
-                result.deinit(a, true);
+                // Check if result is in env (setq stores result in env)
+                var result_in_env = false;
+                var it = e.v.iterator();
+                while (it.next()) |entry| {
+                    if (entry.value_ptr.* == result) {
+                        result_in_env = true;
+                        break;
+                    }
+                }
+                // Free result if not in env
+                if (!result_in_env) {
+                    result.deinit(a, true);
+                }
             } else |err| {
                 try e.printerr(err);
                 return;
             }
             gcASTCount += 1;
-            // Deinit root manually since not stored in list
-            root.deinit(a, true);
+            // Check if root or root's children are in env (defun stores root's children in env)
+            var root_or_children_in_env = false;
+            var it = e.v.iterator();
+            while (it.next()) |entry| {
+                const env_atom = entry.value_ptr.*;
+                if (env_atom == root) {
+                    root_or_children_in_env = true;
+                    break;
+                }
+                // Check if root's children are in env (for defun case)
+                if (root.* == .cell) {
+                    if (root.cell.cdr == env_atom or root.cell.car == env_atom) {
+                        root_or_children_in_env = true;
+                        break;
+                    }
+                }
+            }
+            // Free root appropriately
+            if (!root_or_children_in_env) {
+                root.deinit(a, true);
+            } else {
+                // If root or children are in env, use final=false to avoid double free
+                root.deinit(a, false);
+            }
         } else |err| {
             if (err == error.EndOfStream)
                 break;
@@ -1117,6 +1191,7 @@ test "basic test" {
         .{ .input = "'(1 2 3)", .want = "(1 2 3)\n" },
         .{ .input = "(length '(1 2 3))", .want = "3\n" },
     };
+    
     for (tests) |t| {
         var fs = std.io.fixedBufferStream(t.input);
         var stream = PeekableStream(@TypeOf(fs.reader())).init(fs.reader());
@@ -1132,9 +1207,49 @@ test "basic test" {
                 var result = try eval(&e, a, root);
                 try result.princ(output_stream.writer(), false);
                 _ = try output_stream.writer().write("\n");
-                // Deinit manually since not stored in list
-                result.deinit(a, true);
-                root.deinit(a, true);
+                // Check if result or root (or root's children) are in env
+                var result_in_env = false;
+                var root_or_children_in_env = false;
+                var it = e.v.iterator();
+                while (it.next()) |entry| {
+                    const env_atom = entry.value_ptr.*;
+                    if (env_atom == result) {
+                        result_in_env = true;
+                    }
+                    if (env_atom == root) {
+                        root_or_children_in_env = true;
+                    }
+                    // Check if root's children are in env (for defun case)
+                    if (root.* == .cell) {
+                        if (root.cell.cdr == env_atom or root.cell.car == env_atom) {
+                            root_or_children_in_env = true;
+                        }
+                    }
+                }
+                // Free result if not in env
+                if (!result_in_env) {
+                    result.deinit(a, true);
+                }
+                // Free root appropriately
+                if (!root_or_children_in_env) {
+                    root.deinit(a, true);
+                } else {
+                    // If root's children are in env, detach them before freeing root
+                    if (root.* == .cell) {
+                        // Check which children are in env and detach them
+                        var it2 = e.v.iterator();
+                        while (it2.next()) |entry| {
+                            const env_atom = entry.value_ptr.*;
+                            if (root.cell.cdr == env_atom) {
+                                root.cell.cdr = null;
+                            }
+                            if (root.cell.car == env_atom) {
+                                root.cell.car = null;
+                            }
+                        }
+                    }
+                    root.deinit(a, true);
+                }
             } else |_| {
                 break :loop;
             }

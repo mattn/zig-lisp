@@ -1,6 +1,5 @@
 zig-cache/
 zig-out/
 src/zig-cache/
-example
 .idea
 .zig-cache/

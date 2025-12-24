@@ -426,10 +426,18 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             unreachable;
         },
         atom.quote => |v| try v.?.copy(a),
-        atom.bool => try arg.?.copy(a),
-        atom.num => try arg.?.copy(a),
-        atom.func => try arg.?.copy(a),
-        atom.none => try arg.?.copy(a),
+        atom.bool => |v| blk: {
+            const na = try atom.init(a);
+            na.* = atom{ .bool = v };
+            break :blk na;
+        },
+        atom.num => |v| blk: {
+            const na = try atom.init(a);
+            na.* = atom{ .num = v };
+            break :blk na;
+        },
+        atom.func => arg.?,
+        atom.none => arg.?,
     };
 }
 
@@ -1226,12 +1234,14 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
             if (eval(&e, a, root)) |result| {
                 // Placeholder - skipping append due to Zig version compatibility
                 gcValueCount += 1;
-                // Output result for REPL
-                var stdout_buffer: [1024]u8 = undefined;
-                var stdout_stream = std.io.fixedBufferStream(&stdout_buffer);
-                try result.println(stdout_stream.writer(), false);
-                const written = stdout_stream.getWritten();
-                _ = try std.fs.File.stdout().writeAll(written);
+                // Output result only in REPL mode
+                if (repl) {
+                    var stdout_buffer: [1024]u8 = undefined;
+                    var stdout_stream = std.io.fixedBufferStream(&stdout_buffer);
+                    try result.println(stdout_stream.writer(), false);
+                    const written = stdout_stream.getWritten();
+                    _ = try std.fs.File.stdout().writeAll(written);
+                }
                 // Free result if not in env
                 freeResult(result, &e, a);
             } else |err| {

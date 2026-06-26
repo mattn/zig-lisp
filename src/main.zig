@@ -254,7 +254,6 @@ const atom = union(enum) {
     }
 
     pub fn print(self: @This(), w: anytype, quoted: bool) LispError!void {
-        _ = try w.write(&[_]u8{'\n'});
         try self.princ(w, quoted);
     }
 
@@ -469,7 +468,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         try e.raise("invalid type for -");
     }
     var num: i64 = val.num;
-    val.deinit(a, false);
+    val.deinit(a, true);
     if (arg.cell.cdr == null) {
         const na = try atom.init(a);
         na.* = atom{
@@ -728,6 +727,7 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 
     const name = arg.cell.car.?.cell.car;
     const count = try eval(e, a, arg.cell.car.?.cell.cdr.?);
+    defer count.deinit(a, true);
     if (count.* != atom.num) {
         try e.raise("invalid type for dotimes");
     }
@@ -781,8 +781,15 @@ pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const arg = args;
     const val = try eval(e, a, arg.cell.cdr.?.cell.car.?);
     const name = arg.cell.car.?;
-    const key = try a.dupe(u8, name.sym);
-    try e.v.put(key, val);
+    const gop = try e.v.getOrPut(name.sym);
+    if (gop.found_existing) {
+        // Free the previous value before overwriting it.
+        gop.value_ptr.*.deinit(a, true);
+    } else {
+        // getOrPut stored the borrowed slice as the key; own a copy.
+        gop.key_ptr.* = try a.dupe(u8, name.sym);
+    }
+    gop.value_ptr.* = val;
     return val;
 }
 

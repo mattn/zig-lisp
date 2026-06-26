@@ -24,15 +24,13 @@ pub fn PeekableStream(comptime ReaderType: type) type {
             }
 
             // Otherwise read from the underlying reader
-            var byte: [1]u8 = undefined;
-            const n = self.underlying_reader.read(&byte) catch |err| {
+            const byte = self.underlying_reader.takeByte() catch |err| {
                 switch (err) {
                     error.EndOfStream => return error.EndOfStream,
                     else => return error.NotOpenForReading,
                 }
             };
-            if (n == 0) return error.EndOfStream;
-            return byte[0];
+            return byte;
         }
 
         pub fn putBackByte(self: *Self, byte: u8) void {
@@ -1275,14 +1273,14 @@ pub fn main() anyerror!void {
     var stdin_buffer: [1024]u8 = undefined;
     if (args.len == 1) {
         const stdin_file = std.fs.File.stdin();
-        const stdin_stream = stdin_file.reader(&stdin_buffer);
-        try run(a, stdin_stream, true);
+        var stdin_stream = stdin_file.reader(&stdin_buffer);
+        try run(a, &stdin_stream.interface, true);
     } else {
         for (args[1..]) |arg| {
             var f = try std.fs.cwd().openFile(arg, .{});
             defer f.close();
-            const file_reader = f.reader(&stdin_buffer);
-            try run(a, file_reader, false);
+            var file_reader = f.reader(&stdin_buffer);
+            try run(a, &file_reader.interface, false);
         }
     }
 }
@@ -1304,8 +1302,8 @@ test "basic test" {
     };
     
     for (tests) |t| {
-        var fs = std.io.fixedBufferStream(t.input);
-        var stream = PeekableStream(@TypeOf(fs.reader())).init(fs.reader());
+        var fs = std.Io.Reader.fixed(t.input);
+        var stream = PeekableStream(@TypeOf(&fs)).init(&fs);
         const br = &stream;
 
         var e = env.init(a);

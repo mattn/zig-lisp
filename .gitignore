@@ -3,3 +3,4 @@ zig-out/
 src/zig-cache/
 .idea
 .zig-cache/
+/main

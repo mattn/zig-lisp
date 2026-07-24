@@ -1267,6 +1267,9 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
             if (!repl or !std.fs.File.stdin().isTty()) {
                 return err;
             }
+            // Discard the rest of the line so the offending bytes are not
+            // re-parsed forever
+            br.skipUntilDelimiterOrEof('\n') catch break;
         }
     }
 }

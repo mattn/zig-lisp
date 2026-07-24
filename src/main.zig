@@ -1,5 +1,11 @@
 const std = @import("std");
 
+pub const Diagnostics = struct {
+    line: usize,
+    col: usize,
+    byte: u8,
+};
+
 // Custom PeekableStream that supports putBack functionality
 pub fn PeekableStream(comptime ReaderType: type) type {
     return struct {
@@ -9,27 +15,39 @@ pub fn PeekableStream(comptime ReaderType: type) type {
         peek_buffer: [10]?u8 = [_]?u8{null} ** 10, // Buffer for peeked bytes
         peek_buffer_size: usize = 0,
         peek_start: usize = 0, // Start index for circular buffer
+        // Position of the next byte to read (1-based)
+        line: usize = 1,
+        col: usize = 1,
+        diag: ?Diagnostics = null,
 
         pub fn init(underlying_reader_param: ReaderType) Self {
             return Self{ .underlying_reader = underlying_reader_param };
         }
 
         pub fn readByte(self: *Self) LispError!u8 {
-            // Check if we have peeked bytes available (read from start)
-            if (self.peek_buffer_size > 0) {
-                const byte = self.peek_buffer[self.peek_start];
-                self.peek_start = (self.peek_start + 1) % self.peek_buffer.len;
-                self.peek_buffer_size -= 1;
-                return byte.?;
-            }
-
-            // Otherwise read from the underlying reader
-            const byte = self.underlying_reader.takeByte() catch |err| {
-                switch (err) {
-                    error.EndOfStream => return error.EndOfStream,
-                    else => return error.NotOpenForReading,
+            const byte = blk: {
+                // Check if we have peeked bytes available (read from start)
+                if (self.peek_buffer_size > 0) {
+                    const b = self.peek_buffer[self.peek_start];
+                    self.peek_start = (self.peek_start + 1) % self.peek_buffer.len;
+                    self.peek_buffer_size -= 1;
+                    break :blk b.?;
                 }
+
+                // Otherwise read from the underlying reader
+                break :blk self.underlying_reader.takeByte() catch |err| {
+                    switch (err) {
+                        error.EndOfStream => return error.EndOfStream,
+                        else => return error.NotOpenForReading,
+                    }
+                };
             };
+            if (byte == '\n') {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
             return byte;
         }
 
@@ -38,6 +56,15 @@ pub fn PeekableStream(comptime ReaderType: type) type {
                 self.peek_start = (self.peek_start + self.peek_buffer.len - 1) % self.peek_buffer.len;
                 self.peek_buffer[self.peek_start] = byte;
                 self.peek_buffer_size += 1;
+                if (byte == '\n') {
+                    // The column of the previous line is unknown here, but a
+                    // putback '\n' is always re-read before an error can be
+                    // reported, so the position is corrected by then
+                    self.line -= 1;
+                    self.col = 1;
+                } else if (self.col > 1) {
+                    self.col -= 1;
+                }
             }
         }
 
@@ -1047,6 +1074,7 @@ fn parseQuote(a: std.mem.Allocator, br: anytype) LispError!*atom {
     if (byte != '\x27') return error.SyntaxError;
 
     const c = try parse(a, br);
+    errdefer c.deinit(a, true);
     const p = try atom.init(a);
     p.* = atom{ .quote = c };
     return p;
@@ -1063,6 +1091,7 @@ fn parseCell(a: std.mem.Allocator, br: anytype) LispError!*atom {
             .cdr = null,
         },
     };
+    errdefer top.deinit(a, true);
     var p = top;
 
     while (true) {
@@ -1149,7 +1178,10 @@ fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
         'a'...'z', '>', '<', '=' => try parseIdent(a, br),
         '\x27' => try parseQuote(a, br),
         '"' => try parseString(a, br),
-        else => error.SyntaxError,
+        else => {
+            br.diag = Diagnostics{ .line = br.line, .col = br.col, .byte = byte };
+            return error.SyntaxError;
+        },
     };
 }
 
@@ -1215,7 +1247,7 @@ fn freeRoot(root: *atom, e: *env, a: std.mem.Allocator) void {
     }
 }
 
-fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
+fn run(a: std.mem.Allocator, reader: anytype, repl: bool, name: []const u8) !void {
     var stream = PeekableStream(@TypeOf(reader)).init(reader);
     const br = &stream;
     var e = env.init(a);
@@ -1263,7 +1295,16 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
         } else |err| {
             if (err == error.EndOfStream)
                 break;
-            try e.printerr(err);
+            if (br.diag) |d| {
+                if (std.ascii.isPrint(d.byte)) {
+                    std.debug.print("{s}:{d}:{d}: syntax error: unexpected character '{c}'\n", .{ name, d.line, d.col, d.byte });
+                } else {
+                    std.debug.print("{s}:{d}:{d}: syntax error: unexpected byte 0x{x:0>2}\n", .{ name, d.line, d.col, d.byte });
+                }
+                br.diag = null;
+            } else {
+                try e.printerr(err);
+            }
             if (!repl or !std.fs.File.stdin().isTty()) {
                 return err;
             }
@@ -1276,27 +1317,50 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
 
 var buf: [4096]u8 = undefined;
 
-pub fn main() anyerror!void {
+fn usage() void {
+    std.debug.print(
+        \\usage: zig-lisp [options] [file ...]
+        \\
+        \\With no file, read from stdin (interactive REPL on a terminal).
+        \\
+        \\options:
+        \\  -h, --help    show this help
+        \\
+    , .{});
+}
+
+pub fn main() u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const a = gpa.allocator();
 
-    var args = try std.process.argsAlloc(a);
+    var args = std.process.argsAlloc(a) catch return 1;
     defer std.process.argsFree(a, args);
+
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            usage();
+            return 0;
+        }
+    }
 
     var stdin_buffer: [1024]u8 = undefined;
     if (args.len == 1) {
         const stdin_file = std.fs.File.stdin();
         var stdin_stream = stdin_file.reader(&stdin_buffer);
-        try run(a, &stdin_stream.interface, true);
+        run(a, &stdin_stream.interface, true, "stdin") catch return 1;
     } else {
         for (args[1..]) |arg| {
-            var f = try std.fs.cwd().openFile(arg, .{});
+            var f = std.fs.cwd().openFile(arg, .{}) catch |err| {
+                std.debug.print("zig-lisp: cannot open {s}: {s}\n", .{ arg, @errorName(err) });
+                return 1;
+            };
             defer f.close();
             var file_reader = f.reader(&stdin_buffer);
-            try run(a, &file_reader.interface, false);
+            run(a, &file_reader.interface, false, arg) catch return 1;
         }
     }
+    return 0;
 }
 
 test "basic test" {

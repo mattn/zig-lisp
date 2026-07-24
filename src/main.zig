@@ -147,6 +147,7 @@ const env = struct {
     pub fn printerr(self: *Self, err: anyerror) !void {
         if (self.err != null) {
             std.debug.print("{}: {s}\n", .{ err, self.err.? });
+            self.a.free(self.err.?);
             self.err = null;
         } else {
             std.debug.print("{}\n", .{err});
@@ -1251,7 +1252,10 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool) !void {
                 freeResult(result, &e, a);
             } else |err| {
                 try e.printerr(err);
-                return;
+                if (!repl or !std.fs.File.stdin().isTty()) {
+                    freeRoot(root, &e, a);
+                    return err;
+                }
             }
             gcASTCount += 1;
             // Free root appropriately

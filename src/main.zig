@@ -524,7 +524,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     unreachable;
 }
 
-pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var num: i64 = 1;
     while (true) {
@@ -547,30 +547,25 @@ pub fn do_mat(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     unreachable;
 }
 
-pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+pub fn do_div(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
-    var val = try eval(e, a, arg.cell.car.?);
-    defer val.deinit(a, true);
-    if (val.* != atom.num) {
-        try e.raise("invalid type for /");
-    }
-    var num: i64 = val.num;
-    if (arg.cell.cdr == null) {
-        const na = try atom.init(a);
-        na.* = atom{
-            .num = num,
-        };
-        return na;
-    }
+    var num: i64 = 0;
+    var first = true;
     while (true) {
-        arg = arg.cell.cdr.?;
-        val = try eval(e, a, arg.cell.car.?);
-        if (val.* == atom.num) {
-            num = @divTrunc(num, val.num);
-        } else {
+        var val = try eval(e, a, arg.cell.car.?);
+        defer val.deinit(a, true);
+        if (val.* != atom.num) {
             try e.raise("invalid type for /");
         }
-        val.deinit(a, false);
+        if (first) {
+            num = val.num;
+            first = false;
+        } else {
+            if (val.num == 0) {
+                try e.raise("division by zero");
+            }
+            num = @divTrunc(num, val.num);
+        }
         if (arg.cell.cdr == null) {
             const na = try atom.init(a);
             na.* = atom{
@@ -578,6 +573,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             };
             return na;
         }
+        arg = arg.cell.cdr.?;
     }
     unreachable;
 }
@@ -945,8 +941,8 @@ pub fn do_length(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 var builtins = [_]function{
     .{ .name = "+", .ptr = &do_add },
     .{ .name = "-", .ptr = &do_sub },
-    .{ .name = "*", .ptr = &do_mat },
-    .{ .name = "/", .ptr = &do_mul },
+    .{ .name = "*", .ptr = &do_mul },
+    .{ .name = "/", .ptr = &do_div },
     .{ .name = "<", .ptr = &do_lt },
     .{ .name = ">", .ptr = &do_gt },
     .{ .name = "=", .ptr = &do_eq },
@@ -1044,7 +1040,7 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
             return err;
         };
         switch (byte) {
-            'a'...'z', '0'...'9', '-', '+', '>', '<', '=' => |v| {
+            'a'...'z', '0'...'9', '-', '+', '*', '/', '>', '<', '=' => |v| {
                 // Resize buffer if needed - using a different approach
                 if (pos >= buffer.len) {
                     // For this case, just stop reading to avoid buffer overflow
@@ -1175,7 +1171,7 @@ fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
     return switch (byte) {
         '(' => try parseCell(a, br),
         '0'...'9', '-', '+' => try parseNumber(a, br),
-        'a'...'z', '>', '<', '=' => try parseIdent(a, br),
+        'a'...'z', '*', '/', '>', '<', '=' => try parseIdent(a, br),
         '\x27' => try parseQuote(a, br),
         '"' => try parseString(a, br),
         else => {
@@ -1370,6 +1366,10 @@ test "basic test" {
     const tests = [_]T{
         .{ .input = "1", .want = "1\n" },
         .{ .input = "(+ 1 2)", .want = "3\n" },
+        .{ .input = "(* 2 3)", .want = "6\n" },
+        .{ .input = "(/ 6 2)", .want = "3\n" },
+        .{ .input = "(/ 12 3 2)", .want = "2\n" },
+        .{ .input = "(* (+ 1 2) (- 5 1))", .want = "12\n" },
         .{ .input = "(setq a 1)", .want = "1\n" },
         .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },
         .{ .input = "(defun foo (a b) (+ a b))", .want = "foo\n" },
@@ -1406,4 +1406,78 @@ test "basic test" {
         // Skipping garbage collection for now due to Zig version compatibility
         try std.testing.expect(std.mem.eql(u8, written_bytes, t.want));
     }
+}
+
+test "syntax error diagnostics" {
+    const a = std.testing.allocator;
+
+    const T = struct { input: []const u8, line: usize, col: usize, byte: u8 };
+    const tests = [_]T{
+        .{ .input = "@", .line = 1, .col = 1, .byte = '@' },
+        .{ .input = "  @", .line = 1, .col = 3, .byte = '@' },
+        .{ .input = "\xe3\x81\x82", .line = 1, .col = 1, .byte = 0xe3 },
+        .{ .input = "'@", .line = 1, .col = 2, .byte = '@' },
+        .{ .input = "(+ 1\n @)", .line = 2, .col = 2, .byte = '@' },
+        .{ .input = "'(1 2 @)", .line = 1, .col = 7, .byte = '@' },
+        .{ .input = "; comment\n@", .line = 2, .col = 1, .byte = '@' },
+        .{ .input = "(+ 1 2)\n(+ 3\n   @)", .line = 3, .col = 4, .byte = '@' },
+    };
+
+    for (tests) |t| {
+        var fs = std.Io.Reader.fixed(t.input);
+        var stream = PeekableStream(@TypeOf(&fs)).init(&fs);
+        const br = &stream;
+
+        // Parse until the error; leaks of partially built ASTs are caught by
+        // the testing allocator
+        while (parse(a, br)) |root| {
+            root.deinit(a, true);
+        } else |err| {
+            try std.testing.expectEqual(error.SyntaxError, err);
+        }
+
+        try std.testing.expect(stream.diag != null);
+        const d = stream.diag.?;
+        try std.testing.expectEqual(t.line, d.line);
+        try std.testing.expectEqual(t.col, d.col);
+        try std.testing.expectEqual(t.byte, d.byte);
+    }
+}
+
+test "unterminated expression frees partial ast" {
+    const a = std.testing.allocator;
+
+    const inputs = [_][]const u8{ "(", "(+ 1", "(a (b c", "'", "'(1 2", "\"abc" };
+    for (inputs) |input| {
+        var fs = std.Io.Reader.fixed(input);
+        var stream = PeekableStream(@TypeOf(&fs)).init(&fs);
+
+        // Must fail with EndOfStream and must not leak the partial AST
+        try std.testing.expectError(error.EndOfStream, parse(a, &stream));
+    }
+}
+
+test "parse recovers after skipping the error line" {
+    const a = std.testing.allocator;
+
+    var fs = std.Io.Reader.fixed("@ (this is skipped)\n(+ 1 2)");
+    var stream = PeekableStream(@TypeOf(&fs)).init(&fs);
+    const br = &stream;
+
+    try std.testing.expectError(error.SyntaxError, parse(a, br));
+
+    // Same recovery as the REPL: discard the rest of the line and continue
+    try br.skipUntilDelimiterOrEof('\n');
+    stream.diag = null;
+
+    const root = try parse(a, br);
+    defer root.deinit(a, true);
+    try std.testing.expect(root.* == .cell);
+
+    var e = env.init(a);
+    defer e.deinit();
+    const result = try eval(&e, a, root);
+    defer freeResult(result, &e, a);
+    try std.testing.expect(result.* == .num);
+    try std.testing.expectEqual(@as(i64, 3), result.num);
 }

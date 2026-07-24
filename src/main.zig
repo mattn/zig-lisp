@@ -186,6 +186,7 @@ const atom = union(enum) {
     sym: []u8,
     bool: bool,
     num: i64,
+    fnum: f64,
     str: []u8,
     lambda: lambda,
     func: *const function,
@@ -268,6 +269,7 @@ const atom = union(enum) {
             },
             .bool => {},
             .num => {},
+            .fnum => {},
             .func => {},
             .none => {},
         }
@@ -317,6 +319,16 @@ const atom = union(enum) {
             .num => |v| {
                 var num_buffer: [32]u8 = undefined;
                 const num_str = try std.fmt.bufPrint(&num_buffer, "{}", .{v});
+                _ = try w.write(num_str);
+            },
+            .fnum => |v| {
+                var num_buffer: [400]u8 = undefined;
+                // Keep a trailing ".0" on integral values so the printed form
+                // still reads as a float
+                const num_str = if (std.math.isFinite(v) and @floor(v) == v)
+                    try std.fmt.bufPrint(&num_buffer, "{d:.1}", .{v})
+                else
+                    try std.fmt.bufPrint(&num_buffer, "{d}", .{v});
                 _ = try w.write(num_str);
             },
             .lambda => |v| {
@@ -461,28 +473,67 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             na.* = atom{ .num = v };
             break :blk na;
         },
+        atom.fnum => |v| blk: {
+            const na = try atom.init(a);
+            na.* = atom{ .fnum = v };
+            break :blk na;
+        },
         atom.func => arg.?,
         atom.none => arg.?,
     };
 }
 
+// Accumulator for arithmetic that starts as an integer and is promoted to a
+// float as soon as one operand is a float
+const Number = struct {
+    i: i64 = 0,
+    f: f64 = 0,
+    isf: bool = false,
+
+    fn from(val: *atom) ?Number {
+        return switch (val.*) {
+            .num => |v| Number{ .i = v },
+            .fnum => |v| Number{ .f = v, .isf = true },
+            else => null,
+        };
+    }
+
+    fn asF(self: Number) f64 {
+        return if (self.isf) self.f else @as(f64, @floatFromInt(self.i));
+    }
+
+    fn promote(self: *Number) void {
+        if (!self.isf) {
+            self.f = @floatFromInt(self.i);
+            self.isf = true;
+        }
+    }
+
+    fn toAtom(self: Number, a: std.mem.Allocator) LispError!*atom {
+        const na = try atom.init(a);
+        na.* = if (self.isf) atom{ .fnum = self.f } else atom{ .num = self.i };
+        return na;
+    }
+};
+
 pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
-    var num: i64 = 0;
+    var num = Number{};
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
         defer val.deinit(a, true);
-        if (val.* == atom.num) {
-            num += val.num;
-        } else {
+        const n = Number.from(val) orelse {
             try e.raise("invalid type for +");
+            unreachable;
+        };
+        if (num.isf or n.isf) {
+            num.promote();
+            num.f += n.asF();
+        } else {
+            num.i += n.i;
         }
         if (arg.cell.cdr == null) {
-            const na = try atom.init(a);
-            na.* = atom{
-                .num = num,
-            };
-            return na;
+            return num.toAtom(a);
         }
         arg = arg.cell.cdr.?;
     }
@@ -491,56 +542,50 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 
 pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
-    var val = try eval(e, a, arg.cell.car.?);
-    if (val.* != atom.num) {
-        try e.raise("invalid type for -");
-    }
-    var num: i64 = val.num;
-    val.deinit(a, true);
-    if (arg.cell.cdr == null) {
-        const na = try atom.init(a);
-        na.* = atom{
-            .num = num,
-        };
-        return na;
-    }
+    var num = Number{};
+    var first = true;
     while (true) {
-        arg = arg.cell.cdr.?;
-        val = try eval(e, a, arg.cell.car.?);
+        var val = try eval(e, a, arg.cell.car.?);
         defer val.deinit(a, true);
-        if (val.* == atom.num) {
-            num -= val.num;
-        } else {
+        const n = Number.from(val) orelse {
             try e.raise("invalid type for -");
+            unreachable;
+        };
+        if (first) {
+            num = n;
+            first = false;
+        } else if (num.isf or n.isf) {
+            num.promote();
+            num.f -= n.asF();
+        } else {
+            num.i -= n.i;
         }
         if (arg.cell.cdr == null) {
-            const na = try atom.init(a);
-            na.* = atom{
-                .num = num,
-            };
-            return na;
+            return num.toAtom(a);
         }
+        arg = arg.cell.cdr.?;
     }
     unreachable;
 }
 
 pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
-    var num: i64 = 1;
+    var num = Number{ .i = 1 };
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
         defer val.deinit(a, true);
-        if (val.* == atom.num) {
-            num *= val.num;
-        } else {
+        const n = Number.from(val) orelse {
             try e.raise("invalid type for *");
+            unreachable;
+        };
+        if (num.isf or n.isf) {
+            num.promote();
+            num.f *= n.asF();
+        } else {
+            num.i *= n.i;
         }
         if (arg.cell.cdr == null) {
-            const na = try atom.init(a);
-            na.* = atom{
-                .num = num,
-            };
-            return na;
+            return num.toAtom(a);
         }
         arg = arg.cell.cdr.?;
     }
@@ -549,51 +594,64 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 
 pub fn do_div(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
-    var num: i64 = 0;
+    var num = Number{};
     var first = true;
     while (true) {
         var val = try eval(e, a, arg.cell.car.?);
         defer val.deinit(a, true);
-        if (val.* != atom.num) {
+        const n = Number.from(val) orelse {
             try e.raise("invalid type for /");
-        }
+            unreachable;
+        };
         if (first) {
-            num = val.num;
+            num = n;
             first = false;
-        } else {
-            if (val.num == 0) {
+        } else if (num.isf or n.isf) {
+            if (n.asF() == 0) {
                 try e.raise("division by zero");
             }
-            num = @divTrunc(num, val.num);
+            num.promote();
+            num.f /= n.asF();
+        } else {
+            if (n.i == 0) {
+                try e.raise("division by zero");
+            }
+            num.i = @divTrunc(num.i, n.i);
         }
         if (arg.cell.cdr == null) {
-            const na = try atom.init(a);
-            na.* = atom{
-                .num = num,
-            };
-            return na;
+            return num.toAtom(a);
         }
         arg = arg.cell.cdr.?;
     }
     unreachable;
 }
 
+fn compareNums(e: *env, lhs: *atom, rhs: *atom, msg: []const u8) LispError!std.math.Order {
+    const l = Number.from(lhs) orelse {
+        try e.raise(msg);
+        unreachable;
+    };
+    const r = Number.from(rhs) orelse {
+        try e.raise(msg);
+        unreachable;
+    };
+    if (!l.isf and !r.isf) {
+        return std.math.order(l.i, r.i);
+    }
+    return std.math.order(l.asF(), r.asF());
+}
+
 pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
     defer lhs.deinit(a, true);
-    if (lhs.* != atom.num) {
-        try e.raise("invalid type for <");
-    }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
     defer rhs.deinit(a, true);
-    if (rhs.* != atom.num) {
-        try e.raise("invalid type for <");
-    }
+    const ord = try compareNums(e, lhs, rhs, "invalid type for <");
     const na = try atom.init(a);
     na.* = atom{
-        .bool = lhs.num < rhs.num,
+        .bool = ord == .lt,
     };
     return na;
 }
@@ -602,18 +660,13 @@ pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
     defer lhs.deinit(a, true);
-    if (lhs.* != atom.num) {
-        try e.raise("invalid type for >");
-    }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
     defer rhs.deinit(a, true);
-    if (rhs.* != atom.num) {
-        try e.raise("invalid type for >");
-    }
+    const ord = try compareNums(e, lhs, rhs, "invalid type for >");
     const na = try atom.init(a);
     na.* = atom{
-        .bool = lhs.num > rhs.num,
+        .bool = ord == .gt,
     };
     return na;
 }
@@ -622,18 +675,13 @@ pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
     defer lhs.deinit(a, true);
-    if (lhs.* != atom.num) {
-        try e.raise("invalid type for =");
-    }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
     defer rhs.deinit(a, true);
-    if (rhs.* != atom.num) {
-        try e.raise("invalid type for =");
-    }
+    const ord = try compareNums(e, lhs, rhs, "invalid type for =");
     const na = try atom.init(a);
     na.* = atom{
-        .bool = lhs.num == rhs.num,
+        .bool = ord == .eq,
     };
     return na;
 }
@@ -642,18 +690,13 @@ pub fn do_le(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
     defer lhs.deinit(a, true);
-    if (lhs.* != atom.num) {
-        try e.raise("invalid type for <=");
-    }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
     defer rhs.deinit(a, true);
-    if (rhs.* != atom.num) {
-        try e.raise("invalid type for <=");
-    }
+    const ord = try compareNums(e, lhs, rhs, "invalid type for <=");
     const na = try atom.init(a);
     na.* = atom{
-        .bool = lhs.num <= rhs.num,
+        .bool = ord != .gt,
     };
     return na;
 }
@@ -662,18 +705,13 @@ pub fn do_ge(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var lhs = try eval(e, a, arg.cell.car.?);
     defer lhs.deinit(a, true);
-    if (lhs.* != atom.num) {
-        try e.raise("invalid type for >=");
-    }
     arg = arg.cell.cdr.?;
     var rhs = try eval(e, a, arg.cell.car.?);
     defer rhs.deinit(a, true);
-    if (rhs.* != atom.num) {
-        try e.raise("invalid type for >=");
-    }
+    const ord = try compareNums(e, lhs, rhs, "invalid type for >=");
     const na = try atom.init(a);
     na.* = atom{
-        .bool = lhs.num >= rhs.num,
+        .bool = ord != .lt,
     };
     return na;
 }
@@ -681,26 +719,32 @@ pub fn do_ge(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 pub fn do_1minus(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = try eval(e, a, args.cell.car.?);
     defer arg.deinit(a, true);
-    if (arg.* != atom.num) {
-        try e.raise("invalid type for 1-");
-    }
-    const na = try atom.init(a);
-    na.* = atom{
-        .num = arg.num - 1,
+    const v = switch (arg.*) {
+        .num => |v| atom{ .num = v - 1 },
+        .fnum => |v| atom{ .fnum = v - 1 },
+        else => blk: {
+            try e.raise("invalid type for 1-");
+            break :blk undefined;
+        },
     };
+    const na = try atom.init(a);
+    na.* = v;
     return na;
 }
 
 pub fn do_1plus(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = try eval(e, a, args.cell.car.?);
     defer arg.deinit(a, true);
-    if (arg.* != atom.num) {
-        try e.raise("invalid type for 1+");
-    }
-    const na = try atom.init(a);
-    na.* = atom{
-        .num = arg.num + 1,
+    const v = switch (arg.*) {
+        .num => |v| atom{ .num = v + 1 },
+        .fnum => |v| atom{ .fnum = v + 1 },
+        else => blk: {
+            try e.raise("invalid type for 1+");
+            break :blk undefined;
+        },
     };
+    const na = try atom.init(a);
+    na.* = v;
     return na;
 }
 
@@ -1124,7 +1168,7 @@ fn parseNumber(a: std.mem.Allocator, br: anytype) LispError!*atom {
             return err;
         };
         switch (byte) {
-            '0'...'9', '-', '+', 'e' => |v| {
+            '0'...'9', '-', '+', '.', 'e' => |v| {
                 if (pos >= buffer.len) break :loop; // Prevent buffer overflow
                 buffer[pos] = v;
                 pos += 1;
@@ -1140,6 +1184,13 @@ fn parseNumber(a: std.mem.Allocator, br: anytype) LispError!*atom {
         const p = try atom.init(a);
         p.* = atom{
             .num = num,
+        };
+        return p;
+    } else |_| {}
+    if (std.fmt.parseFloat(f64, buffer[0..pos])) |num| {
+        const p = try atom.init(a);
+        p.* = atom{
+            .fnum = num,
         };
         return p;
     } else |_| {
@@ -1369,6 +1420,20 @@ test "basic test" {
         .{ .input = "(* 2 3)", .want = "6\n" },
         .{ .input = "(/ 6 2)", .want = "3\n" },
         .{ .input = "(/ 12 3 2)", .want = "2\n" },
+        .{ .input = "1.5", .want = "1.5\n" },
+        .{ .input = "-2.5", .want = "-2.5\n" },
+        .{ .input = "1e3", .want = "1000.0\n" },
+        .{ .input = "(+ 1 2.5)", .want = "3.5\n" },
+        .{ .input = "(+ 1.5 1.5)", .want = "3.0\n" },
+        .{ .input = "(- 10 2.5)", .want = "7.5\n" },
+        .{ .input = "(* 2.5 2)", .want = "5.0\n" },
+        .{ .input = "(/ 5 2)", .want = "2\n" },
+        .{ .input = "(/ 5 2.0)", .want = "2.5\n" },
+        .{ .input = "(< 1 1.5)", .want = "T\n" },
+        .{ .input = "(>= 1.5 1.5)", .want = "T\n" },
+        .{ .input = "(= 2 2.0)", .want = "T\n" },
+        .{ .input = "(1+ 0.5)", .want = "1.5\n" },
+        .{ .input = "(setq f 0.5)(+ f f)", .want = "0.5\n1.0\n" },
         .{ .input = "(* (+ 1 2) (- 5 1))", .want = "12\n" },
         .{ .input = "(setq a 1)", .want = "1\n" },
         .{ .input = "(setq a 1)(+ a 2)", .want = "1\n3\n" },

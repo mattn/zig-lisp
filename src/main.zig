@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Diagnostics = struct {
     line: usize,
@@ -110,9 +111,42 @@ const function = struct {
     ptr: *const fn (*env, std.mem.Allocator, *atom) LispError!*atom,
 };
 
+// Symbol names are interned so that environments can compare keys by
+// pointer instead of hashing or comparing strings
+var interned: std.StringHashMapUnmanaged(void) = .empty;
+
+fn intern(a: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const gop = try interned.getOrPut(a, name);
+    if (!gop.found_existing) {
+        gop.key_ptr.* = a.dupe(u8, name) catch |err| {
+            interned.removeByPtr(gop.key_ptr);
+            return err;
+        };
+    }
+    return gop.key_ptr.*;
+}
+
+fn internDeinit(a: std.mem.Allocator) void {
+    var it = interned.keyIterator();
+    while (it.next()) |k| {
+        a.free(k.*);
+    }
+    interned.deinit(a);
+    interned = .empty;
+}
+
+const Item = struct {
+    k: []const u8,
+    v: *atom,
+};
+
 const env = struct {
     a: std.mem.Allocator,
-    v: std.StringArrayHashMap(*atom),
+    // Most environments hold only a few bindings (function arguments), so
+    // they are kept inline and searched linearly by interned key pointer
+    small: [4]Item = undefined,
+    n: usize = 0,
+    more: std.ArrayListUnmanaged(Item) = .empty,
     p: ?*env,
     err: ?[]const u8,
 
@@ -121,16 +155,62 @@ const env = struct {
     pub fn init(a: std.mem.Allocator) Self {
         return Self{
             .a = a,
-            .v = std.StringArrayHashMap(*atom).init(a),
             .p = null,
             .err = null,
         };
     }
 
+    pub const Iterator = struct {
+        e: *env,
+        i: usize = 0,
+
+        pub fn next(self: *Iterator) ?*Item {
+            if (self.i >= self.e.n) return null;
+            defer self.i += 1;
+            if (self.i < self.e.small.len) return &self.e.small[self.i];
+            return &self.e.more.items[self.i - self.e.small.len];
+        }
+    };
+
+    pub fn iterator(self: *Self) Iterator {
+        return .{ .e = self };
+    }
+
+    // Find the binding for key in this environment only
+    pub fn slot(self: *Self, key: []const u8) ?*Item {
+        for (self.small[0..@min(self.n, self.small.len)]) |*it| {
+            if (it.k.ptr == key.ptr) return it;
+        }
+        if (self.n > self.small.len) {
+            for (self.more.items) |*it| {
+                if (it.k.ptr == key.ptr) return it;
+            }
+        }
+        return null;
+    }
+
+    pub fn lookup(self: *Self, key: []const u8) ?*atom {
+        return if (self.slot(key)) |it| it.v else null;
+    }
+
+    // Bind key to val in this environment, replacing an existing binding
+    pub fn put(self: *Self, key: []const u8, val: *atom) !void {
+        if (self.slot(key)) |it| {
+            it.v = val;
+            return;
+        }
+        if (self.n < self.small.len) {
+            self.small[self.n] = .{ .k = key, .v = val };
+        } else {
+            try self.more.append(self.a, .{ .k = key, .v = val });
+        }
+        self.n += 1;
+    }
+
     pub fn get(self: *Self, key: []const u8) !?*atom {
         var e: *env = self;
         while (true) {
-            if (e.v.get(key)) |ev| {
+            if (e.lookup(key)) |ev| {
                 return ev;
             }
             if (e.p == null) {
@@ -143,24 +223,20 @@ const env = struct {
     }
 
     pub fn child(self: *Self) Self {
-        const c = Self{
+        return Self{
             .a = self.a,
-            .v = std.StringArrayHashMap(*atom).init(self.a),
             .p = self,
             .err = null,
         };
-        return c;
     }
 
     pub fn deinit(self: *Self) void {
-        // Free all atoms and keys stored in this environment
-        var it = self.v.iterator();
+        // Free all atoms stored in this environment; keys are interned
+        var it = self.iterator();
         while (it.next()) |entry| {
-            entry.value_ptr.*.deinit(self.a, true);
-            self.a.free(entry.key_ptr.*);
+            entry.v.deinit(self.a, true);
         }
-        self.v.clearAndFree();
-        self.v.deinit();
+        self.more.deinit(self.a);
         if (self.err != null) {
             self.a.free(self.err.?);
         }
@@ -183,7 +259,7 @@ const env = struct {
 };
 
 const atom = union(enum) {
-    sym: []u8,
+    sym: []const u8,
     bool: bool,
     num: i64,
     fnum: f64,
@@ -196,14 +272,35 @@ const atom = union(enum) {
 
     const Self = @This();
 
+    // Freed atoms are kept on a free list and reused in release builds to
+    // avoid going through the allocator for every temporary value. Debug
+    // builds always use the allocator so leaks are still detected.
+    const use_pool = builtin.mode != .Debug;
+    var free_list: ?*atom = null;
+
     pub fn init(a: std.mem.Allocator) !*atom {
+        if (use_pool) {
+            if (free_list) |n| {
+                free_list = n.quote;
+                return n;
+            }
+        }
         return try a.create(atom);
+    }
+
+    fn destroy(self: *Self, a: std.mem.Allocator) void {
+        if (use_pool) {
+            self.* = atom{ .quote = free_list };
+            free_list = self;
+            return;
+        }
+        a.destroy(self);
     }
 
     pub fn copy(self: *Self, a: std.mem.Allocator) !*Self {
         const n = try atom.init(a);
         n.* = switch (self.*) {
-            .sym => |v| atom{ .sym = try a.dupe(u8, v) },
+            .sym => |v| atom{ .sym = v },
             .str => |v| atom{ .str = try a.dupe(u8, v) },
             .cell => |v| atom{
                 .cell = cell{
@@ -230,11 +327,7 @@ const atom = union(enum) {
 
     pub fn deinit(self: *Self, a: std.mem.Allocator, final: bool) void {
         switch (self.*) {
-            .sym => |v| {
-                if (final) {
-                    a.free(v);
-                }
-            },
+            .sym => {},
             .str => |v| {
                 if (final) {
                     a.free(v);
@@ -274,7 +367,7 @@ const atom = union(enum) {
             .none => {},
         }
         if (final) {
-            a.destroy(self);
+            self.destroy(a);
         }
     }
 
@@ -380,7 +473,7 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
         atom.sym => |v| blk: {
             var p = e;
             while (true) {
-                if (p.v.get(v)) |ev| {
+                if (p.lookup(v)) |ev| {
                     break :blk try eval(e, a, ev);
                 }
                 if (p.p == null) {
@@ -412,8 +505,8 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                         var pa = arg.?.cell.car.?.lambda.cell.car;
                         var fa = arg.?.cell.cdr;
                         while (pa != null) {
-                            const key = try a.dupe(u8, pa.?.cell.car.?.sym);
-                            try newe.v.put(
+                            const key = pa.?.cell.car.?.sym;
+                            try newe.put(
                                 key,
                                 try eval(e, a, fa.?.cell.car.?),
                             );
@@ -424,22 +517,25 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                     },
                     atom.sym => {
                         const funcname = arg.?.cell.car.?.sym;
-                        for (builtins, 0..) |b, i| {
-                            if (std.mem.eql(u8, b.name, funcname)) {
-                                break :blk (builtins[i].ptr)(e, a, arg.?.cell.cdr.?);
-                            }
+                        if (builtin_map.get(funcname)) |f| {
+                            break :blk f(e, a, arg.?.cell.cdr.?);
                         }
                         if (try e.get(funcname)) |f| {
                             if (f.cell.cdr.?.* == atom.cell) {
                                 var newe = e.child();
                                 defer newe.deinit();
-                                newe.p = e;
+                                // defun bodies see the global environment
+                                // rather than the caller's, so the lookup
+                                // chain doesn't grow with recursion depth
+                                var g = e;
+                                while (g.p) |gp| g = gp;
+                                newe.p = g;
                                 if (f.cell.cdr != null) {
                                     var pa = f.cell.cdr.?.cell.car;
                                     var fa = arg.?.cell.cdr;
                                     while (pa != null and fa != null) {
-                                        const key = try a.dupe(u8, pa.?.cell.car.?.sym);
-                                        try newe.v.put(
+                                        const key = pa.?.cell.car.?.sym;
+                                        try newe.put(
                                             key,
                                             try eval(e, a, fa.?.cell.car.?),
                                         );
@@ -802,18 +898,18 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var newe = e.child();
     defer newe.deinit();
 
-    const key = try a.dupe(u8, name.?.sym);
+    const key = name.?.sym;
     var i: u32 = 0;
     while (i < count.num) : (i += 1) {
         // Check if key already exists and free old value
-        if (newe.v.get(key)) |old_val| {
+        if (newe.lookup(key)) |old_val| {
             old_val.deinit(a, true);
         }
         const nv = try atom.init(a);
         nv.* = atom{
             .num = @intCast(i),
         };
-        try newe.v.put(key, nv);
+        try newe.put(key, nv);
         // Evaluate all forms in the body
         var body = arg.cell.cdr;
         while (body != null) {
@@ -849,26 +945,22 @@ pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const arg = args;
     const val = try eval(e, a, arg.cell.cdr.?.cell.car.?);
     const name = arg.cell.car.?;
-    const gop = try e.v.getOrPut(name.sym);
-    if (gop.found_existing) {
+    if (e.slot(name.sym)) |it| {
         // Free the previous value before overwriting it.
-        gop.value_ptr.*.deinit(a, true);
+        it.v.deinit(a, true);
+        it.v = val;
     } else {
-        // getOrPut stored the borrowed slice as the key; own a copy.
-        gop.key_ptr.* = try a.dupe(u8, name.sym);
+        try e.put(name.sym, val);
     }
-    gop.value_ptr.* = val;
     return val;
 }
 
 pub fn do_defun(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const name = args.cell.car.?;
-    const key = try a.dupe(u8, name.sym);
-    try e.v.put(key, args);
-    const sym_slice = try a.dupe(u8, name.sym);
+    try e.put(name.sym, args);
     const p = try atom.init(a);
     p.* = atom{
-        .sym = sym_slice,
+        .sym = name.sym,
     };
     return p;
 }
@@ -982,7 +1074,7 @@ pub fn do_length(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     unreachable;
 }
 
-var builtins = [_]function{
+const builtins = [_]function{
     .{ .name = "+", .ptr = &do_add },
     .{ .name = "-", .ptr = &do_sub },
     .{ .name = "*", .ptr = &do_mul },
@@ -1006,6 +1098,18 @@ var builtins = [_]function{
     .{ .name = "lambda", .ptr = &do_lambda },
     .{ .name = "funcall", .ptr = &do_funcall },
     .{ .name = "concatenate", .ptr = &do_concatenate },
+};
+
+const BuiltinFn = *const fn (*env, std.mem.Allocator, *atom) LispError!*atom;
+
+// Name -> function lookup built at compile time to avoid a linear scan of
+// builtins on every call
+const builtin_map = blk: {
+    var kvs: [builtins.len]struct { []const u8, BuiltinFn } = undefined;
+    for (builtins, 0..) |b, i| {
+        kvs[i] = .{ b.name, b.ptr };
+    }
+    break :blk std.StaticStringMap(BuiltinFn).initComptime(kvs);
 };
 
 const SyntaxError = error{};
@@ -1100,7 +1204,7 @@ fn parseIdent(a: std.mem.Allocator, br: anytype) LispError!*atom {
         }
     }
 
-    const sym_slice = try a.dupe(u8, buffer[0..pos]);
+    const sym_slice = try intern(a, buffer[0..pos]);
 
     const p = try atom.init(a);
     p.* = atom{
@@ -1243,9 +1347,9 @@ fn parse(a: std.mem.Allocator, br: anytype) LispError!*atom {
 // Helper function to safely free a result atom that might be in env
 fn freeResult(result: *atom, e: *env, a: std.mem.Allocator) void {
     var result_in_env = false;
-    var it = e.v.iterator();
+    var it = e.iterator();
     while (it.next()) |entry| {
-        if (entry.value_ptr.* == result) {
+        if (entry.v == result) {
             result_in_env = true;
             break;
         }
@@ -1258,9 +1362,9 @@ fn freeResult(result: *atom, e: *env, a: std.mem.Allocator) void {
 // Helper function to safely free a root atom that might have children in env
 fn freeRoot(root: *atom, e: *env, a: std.mem.Allocator) void {
     var root_or_children_in_env = false;
-    var it = e.v.iterator();
+    var it = e.iterator();
     while (it.next()) |entry| {
-        const env_atom = entry.value_ptr.*;
+        const env_atom = entry.v;
         if (env_atom == root) {
             root_or_children_in_env = true;
             break;
@@ -1279,9 +1383,9 @@ fn freeRoot(root: *atom, e: *env, a: std.mem.Allocator) void {
     } else {
         // If root's children are in env, detach them before freeing root
         if (root.* == .cell) {
-            var it2 = e.v.iterator();
+            var it2 = e.iterator();
             while (it2.next()) |entry| {
-                const env_atom = entry.value_ptr.*;
+                const env_atom = entry.v;
                 if (root.cell.cdr == env_atom) {
                     root.cell.cdr = null;
                 }
@@ -1304,8 +1408,7 @@ fn run(a: std.mem.Allocator, reader: anytype, repl: bool, name: []const u8) !voi
     t.* = atom{
         .bool = true,
     };
-    const key_t = try a.dupe(u8, "t");
-    try e.v.put(key_t, t);
+    try e.put(try intern(a, "t"), t);
 
     // Using simple counters instead of ArrayList for compatibility with Zig version
     var gcValueCount: usize = 0;
@@ -1377,9 +1480,14 @@ fn usage() void {
 }
 
 pub fn main() u8 {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const a = gpa.allocator();
+    // The debug allocator is slow but detects leaks, so only use it in debug
+    // builds
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer if (builtin.mode == .Debug) {
+        _ = gpa.deinit();
+    };
+    const a = if (builtin.mode == .Debug) gpa.allocator() else std.heap.smp_allocator;
+    defer internDeinit(a);
 
     var args = std.process.argsAlloc(a) catch return 1;
     defer std.process.argsFree(a, args);
@@ -1412,6 +1520,7 @@ pub fn main() u8 {
 
 test "basic test" {
     const a = std.testing.allocator;
+    defer internDeinit(a);
 
     const T = struct { input: []const u8, want: []const u8 };
     const tests = [_]T{
@@ -1475,6 +1584,7 @@ test "basic test" {
 
 test "syntax error diagnostics" {
     const a = std.testing.allocator;
+    defer internDeinit(a);
 
     const T = struct { input: []const u8, line: usize, col: usize, byte: u8 };
     const tests = [_]T{
@@ -1511,6 +1621,7 @@ test "syntax error diagnostics" {
 
 test "unterminated expression frees partial ast" {
     const a = std.testing.allocator;
+    defer internDeinit(a);
 
     const inputs = [_][]const u8{ "(", "(+ 1", "(a (b c", "'", "'(1 2", "\"abc" };
     for (inputs) |input| {
@@ -1524,6 +1635,7 @@ test "unterminated expression frees partial ast" {
 
 test "parse recovers after skipping the error line" {
     const a = std.testing.allocator;
+    defer internDeinit(a);
 
     var fs = std.Io.Reader.fixed("@ (this is skipped)\n(+ 1 2)");
     var stream = PeekableStream(@TypeOf(&fs)).init(&fs);

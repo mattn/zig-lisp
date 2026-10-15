@@ -537,7 +537,8 @@ fn eval(e: *env, a: std.mem.Allocator, form: *atom) LispError!*atom {
     while (root.* == .cell) {
         const head = root.cell.car.?;
         if (head.* != .sym) break;
-        const f = symBuiltin(head.sym) orelse break;
+        const f = symBuiltin(head.sym) orelse
+            return try callNamed(e, a, head.sym, root.cell.cdr);
         // An if continues with the chosen branch here instead of recursing
         // through do_if
         if (f == &do_if) {
@@ -604,13 +605,7 @@ fn evalCell(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
                 if (symBuiltin(name.*)) |f| {
                     return try f(e, a, arg.?.cell.cdr.?);
                 }
-                if (try e.get(name.*)) |f| {
-                    if (f.cell.cdr.?.* == atom.cell) {
-                        return try callDefun(e, a, f, arg.?.cell.cdr);
-                    }
-                }
-                try e.raise("invalid function");
-                unreachable;
+                return try callNamed(e, a, name.*, arg.?.cell.cdr);
             },
             else => last = try eval(e, a, head),
         }
@@ -619,6 +614,17 @@ fn evalCell(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             return last;
         }
     }
+}
+
+// Call the function defined by defun under name
+fn callNamed(e: *env, a: std.mem.Allocator, name: []const u8, args: ?*atom) LispError!*atom {
+    if (try e.get(name)) |f| {
+        if (f.cell.cdr.?.* == atom.cell) {
+            return try callDefun(e, a, f, args);
+        }
+    }
+    try e.raise("invalid function");
+    unreachable;
 }
 
 // Function calls live outside eval so that their child environment does not
@@ -1652,6 +1658,8 @@ test "basic test" {
         .{ .input = "(concatenate \"foo\" \"bar\")", .want = "foobar\n" },
         .{ .input = "'(1 2 3)", .want = "(1 2 3)\n" },
         .{ .input = "(length '(1 2 3))", .want = "3\n" },
+        .{ .input = "(funcall (lambda (p q) (- p q)) 10 4)", .want = "6\n" },
+        .{ .input = "(defun f (x) (if (< x 2) x (+ (f (- x 1)) (f (- x 2)))))(f 10)", .want = "f\n55\n" },
     };
     
     for (tests) |t| {

@@ -154,7 +154,8 @@ fn internDeinit(a: std.mem.Allocator) void {
 }
 
 const Item = struct {
-    k: []const u8,
+    // Interned name, so only the pointer is needed to identify it
+    k: [*]const u8,
     v: *atom,
 };
 
@@ -197,11 +198,11 @@ const env = struct {
     // Find the binding for key in this environment only
     pub fn slot(self: *Self, key: []const u8) ?*Item {
         for (self.small[0..@min(self.n, self.small.len)]) |*it| {
-            if (it.k.ptr == key.ptr) return it;
+            if (it.k == key.ptr) return it;
         }
         if (self.n > self.small.len) {
             for (self.more.items) |*it| {
-                if (it.k.ptr == key.ptr) return it;
+                if (it.k == key.ptr) return it;
             }
         }
         return null;
@@ -218,9 +219,9 @@ const env = struct {
             return;
         }
         if (self.n < self.small.len) {
-            self.small[self.n] = .{ .k = key, .v = val };
+            self.small[self.n] = .{ .k = key.ptr, .v = val };
         } else {
-            try self.more.append(self.a, .{ .k = key, .v = val });
+            try self.more.append(self.a, .{ .k = key.ptr, .v = val });
         }
         self.n += 1;
     }
@@ -298,12 +299,22 @@ const atom = union(enum) {
 
     pub fn init(a: std.mem.Allocator) !*atom {
         if (use_pool) {
-            if (free_list) |n| {
-                free_list = n.quote;
-                return n;
-            }
+            if (free_list == null) try refill(a);
+            const n = free_list.?;
+            free_list = n.quote;
+            return n;
         }
         return try a.create(atom);
+    }
+
+    // Refill the free list with a contiguous block. Allocating atoms one by
+    // one spreads them so that hot ones collide in the same cache sets.
+    noinline fn refill(a: std.mem.Allocator) !void {
+        const block = try a.alloc(atom, 256);
+        for (block) |*n| {
+            n.* = atom{ .quote = free_list };
+            free_list = n;
+        }
     }
 
     fn destroy(self: *Self, a: std.mem.Allocator) void {
@@ -544,6 +555,21 @@ fn eval(e: *env, a: std.mem.Allocator, form: *atom) LispError!*atom {
                 }
                 p = p.p orelse break;
             }
+            return try evalOther(e, a, root);
+        },
+        .cell => return try evalCell(e, a, root),
+        .bool => |*v| return boolAtom(v.*),
+        .num => |*v| return try numAtom(a, v.*),
+        .func, .none => return root,
+        else => return try evalOther(e, a, root),
+    }
+}
+
+// The less common cases of eval. Keeping them out of eval keeps its stack
+// frame small, which matters for deep recursion.
+noinline fn evalOther(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
+    switch (root.*) {
+        .sym => {
             try e.raise("invalid symbol");
             return root;
         },
@@ -556,16 +582,13 @@ fn eval(e: *env, a: std.mem.Allocator, form: *atom) LispError!*atom {
             return na;
         },
         .lambda => return root.copy(a),
-        .cell => return try evalCell(e, a, root),
         .quote => |*v| return v.*.?.copy(a),
-        .bool => |*v| return boolAtom(v.*),
-        .num => |*v| return try numAtom(a, v.*),
         .fnum => |*v| {
             const na = try atom.init(a);
             na.* = atom{ .fnum = v.* };
             return na;
         },
-        .func, .none => return root,
+        else => unreachable,
     }
 }
 
@@ -791,6 +814,10 @@ inline fn evalNumber(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) L
         },
         else => {},
     }
+    return evalNumberSlow(e, a, x, msg);
+}
+
+noinline fn evalNumberSlow(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) LispError!Number {
     const val = try eval(e, a, x);
     defer val.deinit(a, true);
     return Number.from(val) orelse {

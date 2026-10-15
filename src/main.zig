@@ -523,17 +523,24 @@ fn debug(arg: *atom) !void {
 // expression; the latter made the result round-trip through the stack
 fn eval(e: *env, a: std.mem.Allocator, form: *atom) LispError!*atom {
     var root = form;
-    // An if in tail position continues with the chosen branch here instead
-    // of recursing through do_if
-    while (root.* == .cell and isIf(root)) {
-        root = try ifBranch(e, a, root.cell.cdr.?);
+    while (root.* == .cell) {
+        const head = root.cell.car.?;
+        if (head.* != .sym) break;
+        const f = symBuiltin(head.sym) orelse break;
+        // An if continues with the chosen branch here instead of recursing
+        // through do_if
+        if (f == &do_if) {
+            root = try ifBranch(e, a, root.cell.cdr.?);
+            continue;
+        }
+        return try f(e, a, root.cell.cdr.?);
     }
     switch (root.*) {
         .sym => |*v| {
             var p = e;
             while (true) {
                 if (p.lookup(v.*)) |ev| {
-                    return eval(e, a, ev);
+                    return try eval(e, a, ev);
                 }
                 p = p.p orelse break;
             }
@@ -549,10 +556,10 @@ fn eval(e: *env, a: std.mem.Allocator, form: *atom) LispError!*atom {
             return na;
         },
         .lambda => return root.copy(a),
-        .cell => return evalCell(e, a, root),
+        .cell => return try evalCell(e, a, root),
         .quote => |*v| return v.*.?.copy(a),
         .bool => |*v| return boolAtom(v.*),
-        .num => |*v| return numAtom(a, v.*),
+        .num => |*v| return try numAtom(a, v.*),
         .fnum => |*v| {
             const na = try atom.init(a);
             na.* = atom{ .fnum = v.* };
@@ -572,11 +579,11 @@ fn evalCell(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             .lambda => return callLambda(e, a, head, arg.?.cell.cdr),
             .sym => |*name| {
                 if (symBuiltin(name.*)) |f| {
-                    return f(e, a, arg.?.cell.cdr.?);
+                    return try f(e, a, arg.?.cell.cdr.?);
                 }
                 if (try e.get(name.*)) |f| {
                     if (f.cell.cdr.?.* == atom.cell) {
-                        return callDefun(e, a, f, arg.?.cell.cdr);
+                        return try callDefun(e, a, f, arg.?.cell.cdr);
                     }
                 }
                 try e.raise("invalid function");
@@ -608,7 +615,7 @@ noinline fn callLambda(e: *env, a: std.mem.Allocator, f: *atom, args: ?*atom) Li
         pa = pa.?.cell.cdr;
         fa = fa.?.cell.cdr;
     }
-    return eval(&newe, a, f.lambda.cell.cdr.?);
+    return try eval(&newe, a, f.lambda.cell.cdr.?);
 }
 
 noinline fn callDefun(e: *env, a: std.mem.Allocator, f: *atom, args: ?*atom) LispError!*atom {
@@ -630,7 +637,7 @@ noinline fn callDefun(e: *env, a: std.mem.Allocator, f: *atom, args: ?*atom) Lis
         pa = pa.?.cell.cdr;
         fa = fa.?.cell.cdr;
     }
-    return eval(&newe, a, f.cell.cdr.?.cell.cdr.?.cell.car.?);
+    return try eval(&newe, a, f.cell.cdr.?.cell.cdr.?.cell.car.?);
 }
 
 // Accumulator for arithmetic that starts as an integer and is promoted to a
@@ -662,7 +669,7 @@ const Number = struct {
     }
 
     fn toAtom(self: Number, a: std.mem.Allocator) LispError!*atom {
-        if (!self.isf) return numAtom(a, self.i);
+        if (!self.isf) return try numAtom(a, self.i);
         const na = try atom.init(a);
         na.* = atom{ .fnum = self.f };
         return na;
@@ -681,7 +688,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             num.i += n.i;
         }
         if (arg.cell.cdr == null) {
-            return num.toAtom(a);
+            return try num.toAtom(a);
         }
         arg = arg.cell.cdr.?;
     }
@@ -704,7 +711,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             num.i -= n.i;
         }
         if (arg.cell.cdr == null) {
-            return num.toAtom(a);
+            return try num.toAtom(a);
         }
         arg = arg.cell.cdr.?;
     }
@@ -723,7 +730,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             num.i *= n.i;
         }
         if (arg.cell.cdr == null) {
-            return num.toAtom(a);
+            return try num.toAtom(a);
         }
         arg = arg.cell.cdr.?;
     }
@@ -752,7 +759,7 @@ pub fn do_div(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             num.i = @divTrunc(num.i, n.i);
         }
         if (arg.cell.cdr == null) {
-            return num.toAtom(a);
+            return try num.toAtom(a);
         }
         arg = arg.cell.cdr.?;
     }
@@ -933,12 +940,7 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    return eval(e, a, try ifBranch(e, a, args));
-}
-
-fn isIf(x: *atom) bool {
-    const head = x.cell.car orelse return false;
-    return head.* == .sym and symBuiltin(head.sym) == &do_if;
+    return try eval(e, a, try ifBranch(e, a, args));
 }
 
 // Evaluate the condition of an if and return the branch to evaluate

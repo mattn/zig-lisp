@@ -798,32 +798,51 @@ fn compareNums(l: Number, r: Number) std.math.Order {
 
 // Evaluate x as a number. Literals and variables bound to numbers are read
 // in place, avoiding the copy that eval would allocate.
-inline fn evalNumber(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) LispError!Number {
-    switch (x.*) {
-        .num => |*v| return Number{ .i = v.* },
-        .fnum => |*v| return Number{ .f = v.*, .isf = true },
-        .sym => |*name| {
-            var p = e;
-            while (true) {
-                if (p.lookup(name.*)) |v| {
-                    if (Number.from(v)) |n| return n;
-                    break;
-                }
-                p = p.p orelse break;
-            }
+// Store the number val holds in out. Writing through a pointer rather than
+// returning ?Number keeps the fields from being copied as one wide value,
+// which stalled on store forwarding.
+inline fn numberOf(val: *atom, out: *Number) bool {
+    switch (val.*) {
+        .num => |*v| {
+            out.i = v.*;
+            out.isf = false;
         },
-        else => {},
+        .fnum => |*v| {
+            out.f = v.*;
+            out.isf = true;
+        },
+        else => return false,
     }
-    return evalNumberSlow(e, a, x, msg);
+    return true;
 }
 
-noinline fn evalNumberSlow(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) LispError!Number {
+// The number x denotes if it is a number literal or a variable bound to a
+// number; reading it has no side effects
+inline fn peekNumber(e: *env, x: *atom, out: *Number) bool {
+    if (x.* == .sym) {
+        var p = e;
+        while (true) {
+            if (p.lookup(x.sym)) |v| return numberOf(v, out);
+            p = p.p orelse return false;
+        }
+    }
+    return numberOf(x, out);
+}
+
+inline fn evalNumber(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) LispError!Number {
+    var n: Number = .{};
+    if (peekNumber(e, x, &n)) return n;
+    // Returning a Number through an error union from a separate function
+    // stalled on store forwarding, so the evaluation is done here
     const val = try eval(e, a, x);
-    defer val.deinit(a, true);
-    return Number.from(val) orelse {
-        try e.raise(msg);
-        unreachable;
-    };
+    const ok = numberOf(val, &n);
+    val.deinit(a, true);
+    return if (ok) n else numberTypeError(e, msg);
+}
+
+noinline fn numberTypeError(e: *env, msg: []const u8) LispError {
+    try e.raise(msg);
+    unreachable;
 }
 
 pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
@@ -973,18 +992,44 @@ pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 // Evaluate the condition of an if and return the branch to evaluate
 fn ifBranch(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
-    var cond = try eval(e, a, arg.cell.car.?);
-    defer cond.deinit(a, true);
-    if (cond.* != atom.bool) {
-        try e.raise("invalid type for if");
-    }
+    const truth = compareInPlace(e, arg.cell.car.?) orelse blk: {
+        var cond = try eval(e, a, arg.cell.car.?);
+        defer cond.deinit(a, true);
+        if (cond.* != atom.bool) {
+            try e.raise("invalid type for if");
+        }
+        break :blk cond.bool;
+    };
 
     arg = arg.cell.cdr.?;
-    if (cond.bool) {
+    if (truth) {
         return arg.cell.car.?;
     }
     arg = arg.cell.cdr.?;
     return arg.cell.car.?;
+}
+
+// The result of x if it is a numeric comparison of two literals or
+// variables, computed without evaluating x
+fn compareInPlace(e: *env, x: *atom) ?bool {
+    if (x.* != .cell) return null;
+    const head = x.cell.car orelse return null;
+    if (head.* != .sym) return null;
+    const f = symBuiltin(head.sym) orelse return null;
+    const args = x.cell.cdr orelse return null;
+    const rest = args.cell.cdr orelse return null;
+    if (rest.cell.cdr != null) return null;
+    var l: Number = .{};
+    var r: Number = .{};
+    if (!peekNumber(e, args.cell.car.?, &l)) return null;
+    if (!peekNumber(e, rest.cell.car.?, &r)) return null;
+    const ord = compareNums(l, r);
+    if (f == &do_lt) return ord == .lt;
+    if (f == &do_le) return ord != .gt;
+    if (f == &do_gt) return ord == .gt;
+    if (f == &do_ge) return ord != .lt;
+    if (f == &do_eq) return ord == .eq;
+    return null;
 }
 
 pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {

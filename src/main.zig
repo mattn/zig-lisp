@@ -115,21 +115,39 @@ const function = struct {
 // pointer instead of hashing or comparing strings
 var interned: std.StringHashMapUnmanaged(void) = .empty;
 
+// Each interned name is stored right after a header holding the builtin
+// function of that name (if any), so eval can find a builtin from the
+// symbol without a lookup
+const sym_header = @sizeOf(?BuiltinFn);
+
 fn intern(a: std.mem.Allocator, name: []const u8) ![]const u8 {
     const gop = try interned.getOrPut(a, name);
     if (!gop.found_existing) {
-        gop.key_ptr.* = a.dupe(u8, name) catch |err| {
+        const mem = a.alignedAlloc(u8, .of(?BuiltinFn), sym_header + name.len) catch |err| {
             interned.removeByPtr(gop.key_ptr);
             return err;
         };
+        std.mem.bytesAsValue(?BuiltinFn, mem[0..sym_header]).* = builtin_map.get(name);
+        @memcpy(mem[sym_header..], name);
+        gop.key_ptr.* = mem[sym_header..];
     }
     return gop.key_ptr.*;
+}
+
+fn symHeader(name: []const u8) []align(@alignOf(?BuiltinFn)) u8 {
+    const base: [*]align(@alignOf(?BuiltinFn)) u8 = @ptrCast(@alignCast(@constCast(name.ptr - sym_header)));
+    return base[0 .. sym_header + name.len];
+}
+
+// The builtin function named by an interned symbol
+fn symBuiltin(name: []const u8) ?BuiltinFn {
+    return std.mem.bytesAsValue(?BuiltinFn, symHeader(name)[0..sym_header]).*;
 }
 
 fn internDeinit(a: std.mem.Allocator) void {
     var it = interned.keyIterator();
     while (it.next()) |k| {
-        a.free(k.*);
+        a.free(symHeader(k.*));
     }
     interned.deinit(a);
     interned = .empty;
@@ -498,52 +516,15 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             while (true) {
                 last = try switch (arg.?.cell.car.?.*) {
                     atom.func => (arg.?.cell.car.?.func.ptr)(e, a, arg.?.cell.cdr.?),
-                    atom.lambda => {
-                        var newe = e.child();
-                        defer newe.deinit();
-                        newe.p = arg.?.cell.car.?.lambda.e.?;
-                        var pa = arg.?.cell.car.?.lambda.cell.car;
-                        var fa = arg.?.cell.cdr;
-                        while (pa != null) {
-                            const key = pa.?.cell.car.?.sym;
-                            try newe.put(
-                                key,
-                                try eval(e, a, fa.?.cell.car.?),
-                            );
-                            pa = pa.?.cell.cdr;
-                            fa = fa.?.cell.cdr;
-                        }
-                        break :blk eval(&newe, a, arg.?.cell.car.?.lambda.cell.cdr.?);
-                    },
+                    atom.lambda => break :blk callLambda(e, a, arg.?.cell.car.?, arg.?.cell.cdr),
                     atom.sym => {
                         const funcname = arg.?.cell.car.?.sym;
-                        if (builtin_map.get(funcname)) |f| {
+                        if (symBuiltin(funcname)) |f| {
                             break :blk f(e, a, arg.?.cell.cdr.?);
                         }
                         if (try e.get(funcname)) |f| {
                             if (f.cell.cdr.?.* == atom.cell) {
-                                var newe = e.child();
-                                defer newe.deinit();
-                                // defun bodies see the global environment
-                                // rather than the caller's, so the lookup
-                                // chain doesn't grow with recursion depth
-                                var g = e;
-                                while (g.p) |gp| g = gp;
-                                newe.p = g;
-                                if (f.cell.cdr != null) {
-                                    var pa = f.cell.cdr.?.cell.car;
-                                    var fa = arg.?.cell.cdr;
-                                    while (pa != null and fa != null) {
-                                        const key = pa.?.cell.car.?.sym;
-                                        try newe.put(
-                                            key,
-                                            try eval(e, a, fa.?.cell.car.?),
-                                        );
-                                        pa = pa.?.cell.cdr;
-                                        fa = fa.?.cell.cdr;
-                                    }
-                                }
-                                break :blk eval(&newe, a, f.cell.cdr.?.cell.cdr.?.cell.car.?);
+                                break :blk callDefun(e, a, f, arg.?.cell.cdr);
                             }
                         }
                         try e.raise("invalid function");
@@ -577,6 +558,48 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
         atom.func => arg.?,
         atom.none => arg.?,
     };
+}
+
+// Function calls live outside eval so that their child environment does not
+// enlarge eval's stack frame, which every evaluation pays for
+noinline fn callLambda(e: *env, a: std.mem.Allocator, f: *atom, args: ?*atom) LispError!*atom {
+    var newe = e.child();
+    defer newe.deinit();
+    newe.p = f.lambda.e.?;
+    var pa = f.lambda.cell.car;
+    var fa = args;
+    while (pa != null) {
+        const key = pa.?.cell.car.?.sym;
+        try newe.put(
+            key,
+            try eval(e, a, fa.?.cell.car.?),
+        );
+        pa = pa.?.cell.cdr;
+        fa = fa.?.cell.cdr;
+    }
+    return eval(&newe, a, f.lambda.cell.cdr.?);
+}
+
+noinline fn callDefun(e: *env, a: std.mem.Allocator, f: *atom, args: ?*atom) LispError!*atom {
+    var newe = e.child();
+    defer newe.deinit();
+    // defun bodies see the global environment rather than the caller's, so
+    // the lookup chain doesn't grow with recursion depth
+    var g = e;
+    while (g.p) |gp| g = gp;
+    newe.p = g;
+    var pa = f.cell.cdr.?.cell.car;
+    var fa = args;
+    while (pa != null and fa != null) {
+        const key = pa.?.cell.car.?.sym;
+        try newe.put(
+            key,
+            try eval(e, a, fa.?.cell.car.?),
+        );
+        pa = pa.?.cell.cdr;
+        fa = fa.?.cell.cdr;
+    }
+    return eval(&newe, a, f.cell.cdr.?.cell.cdr.?.cell.car.?);
 }
 
 // Accumulator for arithmetic that starts as an integer and is promoted to a
@@ -616,12 +639,7 @@ pub fn do_add(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var num = Number{};
     while (true) {
-        var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, true);
-        const n = Number.from(val) orelse {
-            try e.raise("invalid type for +");
-            unreachable;
-        };
+        const n = try evalNumber(e, a, arg.cell.car.?, "invalid type for +");
         if (num.isf or n.isf) {
             num.promote();
             num.f += n.asF();
@@ -641,12 +659,7 @@ pub fn do_sub(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num = Number{};
     var first = true;
     while (true) {
-        var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, true);
-        const n = Number.from(val) orelse {
-            try e.raise("invalid type for -");
-            unreachable;
-        };
+        const n = try evalNumber(e, a, arg.cell.car.?, "invalid type for -");
         if (first) {
             num = n;
             first = false;
@@ -668,12 +681,7 @@ pub fn do_mul(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var num = Number{ .i = 1 };
     while (true) {
-        var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, true);
-        const n = Number.from(val) orelse {
-            try e.raise("invalid type for *");
-            unreachable;
-        };
+        const n = try evalNumber(e, a, arg.cell.car.?, "invalid type for *");
         if (num.isf or n.isf) {
             num.promote();
             num.f *= n.asF();
@@ -693,12 +701,7 @@ pub fn do_div(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var num = Number{};
     var first = true;
     while (true) {
-        var val = try eval(e, a, arg.cell.car.?);
-        defer val.deinit(a, true);
-        const n = Number.from(val) orelse {
-            try e.raise("invalid type for /");
-            unreachable;
-        };
+        const n = try evalNumber(e, a, arg.cell.car.?, "invalid type for /");
         if (first) {
             num = n;
             first = false;
@@ -722,29 +725,43 @@ pub fn do_div(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     unreachable;
 }
 
-fn compareNums(e: *env, lhs: *atom, rhs: *atom, msg: []const u8) LispError!std.math.Order {
-    const l = Number.from(lhs) orelse {
-        try e.raise(msg);
-        unreachable;
-    };
-    const r = Number.from(rhs) orelse {
-        try e.raise(msg);
-        unreachable;
-    };
+fn compareNums(l: Number, r: Number) std.math.Order {
     if (!l.isf and !r.isf) {
         return std.math.order(l.i, r.i);
     }
     return std.math.order(l.asF(), r.asF());
 }
 
+// Evaluate x as a number. Literals and variables bound to numbers are read
+// in place, avoiding the copy that eval would allocate.
+fn evalNumber(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) LispError!Number {
+    switch (x.*) {
+        .num => |v| return Number{ .i = v },
+        .fnum => |v| return Number{ .f = v, .isf = true },
+        .sym => |name| {
+            var p = e;
+            while (true) {
+                if (p.lookup(name)) |v| {
+                    if (Number.from(v)) |n| return n;
+                    break;
+                }
+                p = p.p orelse break;
+            }
+        },
+        else => {},
+    }
+    const val = try eval(e, a, x);
+    defer val.deinit(a, true);
+    return Number.from(val) orelse {
+        try e.raise(msg);
+        unreachable;
+    };
+}
+
 pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var arg = args;
-    var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, true);
-    arg = arg.cell.cdr.?;
-    var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, true);
-    const ord = try compareNums(e, lhs, rhs, "invalid type for <");
+    const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for <");
+    const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for <");
+    const ord = compareNums(lhs, rhs);
     const na = try atom.init(a);
     na.* = atom{
         .bool = ord == .lt,
@@ -753,13 +770,9 @@ pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var arg = args;
-    var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, true);
-    arg = arg.cell.cdr.?;
-    var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, true);
-    const ord = try compareNums(e, lhs, rhs, "invalid type for >");
+    const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for >");
+    const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for >");
+    const ord = compareNums(lhs, rhs);
     const na = try atom.init(a);
     na.* = atom{
         .bool = ord == .gt,
@@ -768,13 +781,9 @@ pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var arg = args;
-    var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, true);
-    arg = arg.cell.cdr.?;
-    var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, true);
-    const ord = try compareNums(e, lhs, rhs, "invalid type for =");
+    const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for =");
+    const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for =");
+    const ord = compareNums(lhs, rhs);
     const na = try atom.init(a);
     na.* = atom{
         .bool = ord == .eq,
@@ -783,13 +792,9 @@ pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_le(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var arg = args;
-    var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, true);
-    arg = arg.cell.cdr.?;
-    var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, true);
-    const ord = try compareNums(e, lhs, rhs, "invalid type for <=");
+    const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for <=");
+    const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for <=");
+    const ord = compareNums(lhs, rhs);
     const na = try atom.init(a);
     na.* = atom{
         .bool = ord != .gt,
@@ -798,13 +803,9 @@ pub fn do_le(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_ge(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
-    var arg = args;
-    var lhs = try eval(e, a, arg.cell.car.?);
-    defer lhs.deinit(a, true);
-    arg = arg.cell.cdr.?;
-    var rhs = try eval(e, a, arg.cell.car.?);
-    defer rhs.deinit(a, true);
-    const ord = try compareNums(e, lhs, rhs, "invalid type for >=");
+    const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for >=");
+    const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for >=");
+    const ord = compareNums(lhs, rhs);
     const na = try atom.init(a);
     na.* = atom{
         .bool = ord != .lt,

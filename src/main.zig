@@ -521,7 +521,13 @@ fn debug(arg: *atom) !void {
 
 // Each branch returns directly rather than yielding a value out of a switch
 // expression; the latter made the result round-trip through the stack
-fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
+fn eval(e: *env, a: std.mem.Allocator, form: *atom) LispError!*atom {
+    var root = form;
+    // An if in tail position continues with the chosen branch here instead
+    // of recursing through do_if
+    while (root.* == .cell and isIf(root)) {
+        root = try ifBranch(e, a, root.cell.cdr.?);
+    }
     switch (root.*) {
         .sym => |*v| {
             var p = e;
@@ -927,6 +933,16 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 }
 
 pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    return eval(e, a, try ifBranch(e, a, args));
+}
+
+fn isIf(x: *atom) bool {
+    const head = x.cell.car orelse return false;
+    return head.* == .sym and symBuiltin(head.sym) == &do_if;
+}
+
+// Evaluate the condition of an if and return the branch to evaluate
+fn ifBranch(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     var arg = args;
     var cond = try eval(e, a, arg.cell.car.?);
     defer cond.deinit(a, true);
@@ -936,10 +952,10 @@ pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
 
     arg = arg.cell.cdr.?;
     if (cond.bool) {
-        return try eval(e, a, arg.cell.car.?);
+        return arg.cell.car.?;
     }
     arg = arg.cell.cdr.?;
-    return try eval(e, a, arg.cell.car.?);
+    return arg.cell.car.?;
 }
 
 pub fn do_setq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {

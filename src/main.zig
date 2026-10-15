@@ -519,72 +519,70 @@ fn debug(arg: *atom) !void {
     try arg.println(std.io.getStdOut().writer(), false);
 }
 
+// Each branch returns directly rather than yielding a value out of a switch
+// expression; the latter made the result round-trip through the stack
 fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
-    var arg: ?*atom = root;
-
-    return switch (arg.?.*) {
-        atom.sym => |v| blk: {
+    switch (root.*) {
+        .sym => |*v| {
             var p = e;
             while (true) {
-                if (p.lookup(v)) |ev| {
-                    break :blk try eval(e, a, ev);
+                if (p.lookup(v.*)) |ev| {
+                    return eval(e, a, ev);
                 }
-                if (p.p == null) {
-                    break;
-                }
-                p = p.p.?;
+                p = p.p orelse break;
             }
             try e.raise("invalid symbol");
-            break :blk root;
+            return root;
         },
-        atom.str => |v| blk: {
-            const str_slice = try a.dupe(u8, v);
+        .str => |*v| {
+            const str_slice = try a.dupe(u8, v.*);
             const na = try atom.init(a);
             na.* = atom{
                 .str = str_slice,
             };
-            break :blk na;
+            return na;
         },
-        atom.lambda => try arg.?.copy(a),
-        atom.cell => blk: {
-            var last = arg.?;
-            while (true) {
-                last = try switch (arg.?.cell.car.?.*) {
-                    atom.func => (arg.?.cell.car.?.func.ptr)(e, a, arg.?.cell.cdr.?),
-                    atom.lambda => break :blk callLambda(e, a, arg.?.cell.car.?, arg.?.cell.cdr),
-                    atom.sym => {
-                        const funcname = arg.?.cell.car.?.sym;
-                        if (symBuiltin(funcname)) |f| {
-                            break :blk f(e, a, arg.?.cell.cdr.?);
-                        }
-                        if (try e.get(funcname)) |f| {
-                            if (f.cell.cdr.?.* == atom.cell) {
-                                break :blk callDefun(e, a, f, arg.?.cell.cdr);
-                            }
-                        }
-                        try e.raise("invalid function");
-                        break :blk undefined;
-                    },
-                    else => eval(e, a, arg.?.cell.car.?),
-                };
-                arg = arg.?.cell.cdr;
-                if (arg == null) {
-                    break :blk last;
-                }
-            }
-            unreachable;
-        },
-        atom.quote => |v| try v.?.copy(a),
-        atom.bool => |v| boolAtom(v),
-        atom.num => |v| try numAtom(a, v),
-        atom.fnum => |v| blk: {
+        .lambda => return root.copy(a),
+        .cell => return evalCell(e, a, root),
+        .quote => |*v| return v.*.?.copy(a),
+        .bool => |*v| return boolAtom(v.*),
+        .num => |*v| return numAtom(a, v.*),
+        .fnum => |*v| {
             const na = try atom.init(a);
-            na.* = atom{ .fnum = v };
-            break :blk na;
+            na.* = atom{ .fnum = v.* };
+            return na;
         },
-        atom.func => arg.?,
-        atom.none => arg.?,
-    };
+        .func, .none => return root,
+    }
+}
+
+fn evalCell(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
+    var arg: ?*atom = root;
+    var last = root;
+    while (true) {
+        const head = arg.?.cell.car.?;
+        switch (head.*) {
+            .func => |*f| last = try f.*.ptr(e, a, arg.?.cell.cdr.?),
+            .lambda => return callLambda(e, a, head, arg.?.cell.cdr),
+            .sym => |*name| {
+                if (symBuiltin(name.*)) |f| {
+                    return f(e, a, arg.?.cell.cdr.?);
+                }
+                if (try e.get(name.*)) |f| {
+                    if (f.cell.cdr.?.* == atom.cell) {
+                        return callDefun(e, a, f, arg.?.cell.cdr);
+                    }
+                }
+                try e.raise("invalid function");
+                unreachable;
+            },
+            else => last = try eval(e, a, head),
+        }
+        arg = arg.?.cell.cdr;
+        if (arg == null) {
+            return last;
+        }
+    }
 }
 
 // Function calls live outside eval so that their child environment does not

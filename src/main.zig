@@ -344,6 +344,7 @@ const atom = union(enum) {
     }
 
     pub fn deinit(self: *Self, a: std.mem.Allocator, final: bool) void {
+        if (isShared(self)) return;
         switch (self.*) {
             .sym => {},
             .str => |v| {
@@ -480,6 +481,40 @@ const atom = union(enum) {
     }
 };
 
+// Booleans and small integers are shared preallocated atoms, so producing
+// them does not allocate. deinit leaves them alone.
+const small_int_min = -16;
+const small_int_max = 1024;
+var shared_atoms: [2 + small_int_max - small_int_min + 1]atom = blk: {
+    @setEvalBranchQuota(10000);
+    var atoms: [2 + small_int_max - small_int_min + 1]atom = undefined;
+    atoms[0] = atom{ .bool = false };
+    atoms[1] = atom{ .bool = true };
+    for (atoms[2..], 0..) |*x, i| {
+        x.* = atom{ .num = small_int_min + @as(i64, @intCast(i)) };
+    }
+    break :blk atoms;
+};
+
+fn isShared(x: *const atom) bool {
+    const p = @intFromPtr(x);
+    const base = @intFromPtr(&shared_atoms);
+    return p >= base and p < base + @sizeOf(@TypeOf(shared_atoms));
+}
+
+fn boolAtom(v: bool) *atom {
+    return &shared_atoms[@intFromBool(v)];
+}
+
+fn numAtom(a: std.mem.Allocator, v: i64) !*atom {
+    if (v >= small_int_min and v <= small_int_max) {
+        return &shared_atoms[@intCast(v - small_int_min + 2)];
+    }
+    const na = try atom.init(a);
+    na.* = atom{ .num = v };
+    return na;
+}
+
 fn debug(arg: *atom) !void {
     try arg.println(std.io.getStdOut().writer(), false);
 }
@@ -540,16 +575,8 @@ fn eval(e: *env, a: std.mem.Allocator, root: *atom) LispError!*atom {
             unreachable;
         },
         atom.quote => |v| try v.?.copy(a),
-        atom.bool => |v| blk: {
-            const na = try atom.init(a);
-            na.* = atom{ .bool = v };
-            break :blk na;
-        },
-        atom.num => |v| blk: {
-            const na = try atom.init(a);
-            na.* = atom{ .num = v };
-            break :blk na;
-        },
+        atom.bool => |v| boolAtom(v),
+        atom.num => |v| try numAtom(a, v),
         atom.fnum => |v| blk: {
             const na = try atom.init(a);
             na.* = atom{ .fnum = v };
@@ -610,9 +637,11 @@ const Number = struct {
     isf: bool = false,
 
     fn from(val: *atom) ?Number {
+        // Capture by pointer so the whole atom is not copied just to read
+        // its tag
         return switch (val.*) {
-            .num => |v| Number{ .i = v },
-            .fnum => |v| Number{ .f = v, .isf = true },
+            .num => |*v| Number{ .i = v.* },
+            .fnum => |*v| Number{ .f = v.*, .isf = true },
             else => null,
         };
     }
@@ -629,8 +658,9 @@ const Number = struct {
     }
 
     fn toAtom(self: Number, a: std.mem.Allocator) LispError!*atom {
+        if (!self.isf) return numAtom(a, self.i);
         const na = try atom.init(a);
-        na.* = if (self.isf) atom{ .fnum = self.f } else atom{ .num = self.i };
+        na.* = atom{ .fnum = self.f };
         return na;
     }
 };
@@ -734,14 +764,14 @@ fn compareNums(l: Number, r: Number) std.math.Order {
 
 // Evaluate x as a number. Literals and variables bound to numbers are read
 // in place, avoiding the copy that eval would allocate.
-fn evalNumber(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) LispError!Number {
+inline fn evalNumber(e: *env, a: std.mem.Allocator, x: *atom, msg: []const u8) LispError!Number {
     switch (x.*) {
-        .num => |v| return Number{ .i = v },
-        .fnum => |v| return Number{ .f = v, .isf = true },
-        .sym => |name| {
+        .num => |*v| return Number{ .i = v.* },
+        .fnum => |*v| return Number{ .f = v.*, .isf = true },
+        .sym => |*name| {
             var p = e;
             while (true) {
-                if (p.lookup(name)) |v| {
+                if (p.lookup(name.*)) |v| {
                     if (Number.from(v)) |n| return n;
                     break;
                 }
@@ -762,55 +792,35 @@ pub fn do_lt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for <");
     const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for <");
     const ord = compareNums(lhs, rhs);
-    const na = try atom.init(a);
-    na.* = atom{
-        .bool = ord == .lt,
-    };
-    return na;
+    return boolAtom(ord == .lt);
 }
 
 pub fn do_gt(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for >");
     const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for >");
     const ord = compareNums(lhs, rhs);
-    const na = try atom.init(a);
-    na.* = atom{
-        .bool = ord == .gt,
-    };
-    return na;
+    return boolAtom(ord == .gt);
 }
 
 pub fn do_eq(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for =");
     const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for =");
     const ord = compareNums(lhs, rhs);
-    const na = try atom.init(a);
-    na.* = atom{
-        .bool = ord == .eq,
-    };
-    return na;
+    return boolAtom(ord == .eq);
 }
 
 pub fn do_le(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for <=");
     const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for <=");
     const ord = compareNums(lhs, rhs);
-    const na = try atom.init(a);
-    na.* = atom{
-        .bool = ord != .gt,
-    };
-    return na;
+    return boolAtom(ord != .gt);
 }
 
 pub fn do_ge(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
     const lhs = try evalNumber(e, a, args.cell.car.?, "invalid type for >=");
     const rhs = try evalNumber(e, a, args.cell.cdr.?.cell.car.?, "invalid type for >=");
     const ord = compareNums(lhs, rhs);
-    const na = try atom.init(a);
-    na.* = atom{
-        .bool = ord != .lt,
-    };
-    return na;
+    return boolAtom(ord != .lt);
 }
 
 pub fn do_1minus(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
@@ -880,11 +890,7 @@ pub fn do_cond(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
         }
         arg = arg.cell.cdr.?;
     }
-    const na = try atom.init(a);
-    na.* = atom{
-        .bool = false,
-    };
-    return na;
+    return boolAtom(false);
 }
 
 pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
@@ -919,11 +925,7 @@ pub fn do_dotimes(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             body = body.?.cell.cdr;
         }
     }
-    const na = try atom.init(a);
-    na.* = atom{
-        .bool = false,
-    };
-    return na;
+    return boolAtom(false);
 }
 
 pub fn do_if(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {

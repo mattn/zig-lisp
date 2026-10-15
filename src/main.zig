@@ -1131,16 +1131,26 @@ pub fn do_funcall(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
             .cdr = args.cell.cdr,
         },
     };
-    defer p.deinit(a, true);
+    defer {
+        // The arguments belong to the caller's AST; only the call cell and
+        // the evaluated function are ours to free
+        p.cell.cdr = null;
+        p.deinit(a, true);
+    }
     return try eval(e, a, p);
 }
 
 pub fn do_lambda(e: *env, a: std.mem.Allocator, args: *atom) LispError!*atom {
+    // The lambda owns its parameters and body, as deinit frees them; sharing
+    // them with the AST freed the AST twice
+    const params = if (args.cell.car) |c| try c.copy(a) else null;
+    errdefer if (params) |c| c.deinit(a, true);
+    const body = if (args.cell.cdr) |c| try c.copy(a) else null;
     const p = try atom.init(a);
     p.* = atom{
         .lambda = .{
             .e = e,
-            .cell = args.cell,
+            .cell = .{ .car = params, .cdr = body },
         },
     };
     return p;
